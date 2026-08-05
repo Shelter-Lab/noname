@@ -1,0 +1,13 @@
+{
+	// Cloudflare 纯静态托管配置(Workers Static Assets)
+	// 无名杀是纯静态站,无需 Worker 脚本(不写 main 字段)
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "noname",
+	"compatibility_date": "2026-08-05",
+	"assets": {
+		"directory": "./dist/"
+		// 不设 not_found_handling:保持 404 真实返回 404。
+		// 原因:browser.js 的 checkFile 用 HEAD 请求探测文件是否存在,
+		// 若把 404 fallback 成 200+index.html,会导致文件探测永远误判"存在",破坏扩展加载逻辑。
+	}
+}
