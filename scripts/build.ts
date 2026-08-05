@@ -21,5 +21,8 @@ await Promise.all([
 	fs.cp("docs", "dist/docs", { recursive: true }),
 	fs.cp(".nomedia", "dist/.nomedia"),
 	fs.cp("LICENSE", "dist/LICENSE"),
-	fs.cp("README.md", "dist/README.md")
+	fs.cp("README.md", "dist/README.md"),
+	// PWA:清单与离线缓存 SW(纯静态部署可安装、离线可玩)
+	fs.cp("apps/core/manifest.webmanifest", "dist/manifest.webmanifest"),
+	fs.cp("apps/core/pwa-sw.js", "dist/pwa-sw.js")
 ]);

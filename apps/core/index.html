@@ -9,6 +9,22 @@
 	<!-- 禁止缩放 手机端全屏 -->
 	<meta name="viewport" content="user-scalable=no, viewport-fit=cover" />
 	<title>无名杀</title>
+	<!-- PWA:可安装 / 独立窗口 / 离线 -->
+	<link rel="manifest" href="./manifest.webmanifest" />
+	<meta name="theme-color" content="#000000" />
+	<meta name="apple-mobile-web-app-capable" content="yes" />
+	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+	<meta name="apple-mobile-web-app-title" content="无名杀" />
+	<link rel="apple-touch-icon" href="./image/pwa/apple-touch-icon.png" />
+	<link rel="icon" type="image/png" href="./image/pwa/icon-192.png" />
+	<script>
+		// 注册 PWA Service Worker(离线缓存)。失败不影响游戏运行。
+		if ("serviceWorker" in navigator) {
+			window.addEventListener("load", () => {
+				navigator.serviceWorker.register("./pwa-sw.js").catch(err => console.warn("PWA SW 注册失败:", err));
+			});
+		}
+	</script>
 	<script>
 		"use strict";
 		(() => {
