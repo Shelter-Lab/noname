@@ -1,14 +1,24 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
-spawnSync("pnpm -F noname... build", {
-	shell: true,
-	stdio: "inherit",
-});
+import { existsSync } from "node:fs";
 
-spawnSync("pnpm -F ./packages/extension/** build", {
-	shell: true,
-	stdio: "inherit",
-});
+/** 执行子命令,非 0 退出码立即终止并报清楚是哪条命令失败 */
+function run(cmd: string) {
+	const r = spawnSync(cmd, { shell: true, stdio: "inherit" });
+	if (r.status !== 0) {
+		throw new Error(`构建命令失败(退出码 ${r.status}): ${cmd}`);
+	}
+}
+
+// 先显式构建本体(core,包名 noname)及其工作区依赖(fs/jit)。
+// 注意:`-F noname...` 的 `...` 依赖语法在不同 pnpm 版本行为不一致
+// (pnpm 10 曾在 CI 中漏掉 core 本体),故构建后显式校验产物存在。
+run("pnpm -F noname... build");
+if (!existsSync("apps/core/dist")) {
+	throw new Error("apps/core/dist 未生成——core 本体未被构建(检查 pnpm 版本 / -F 过滤器是否匹配到 noname 包)");
+}
+
+run("pnpm -F ./packages/extension/** build");
 
 console.log("合并打包结果");
 await fs.rm("dist", { recursive: true, force: true });
