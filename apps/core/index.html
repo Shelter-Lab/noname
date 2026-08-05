@@ -9,6 +9,63 @@
 	<!-- 禁止缩放 手机端全屏 -->
 	<meta name="viewport" content="user-scalable=no, viewport-fit=cover" />
 	<title>无名杀</title>
+	<script>
+		// iOS PWA / 隐私模式下 localStorage、sessionStorage 可能为 null 或访问抛异常,
+		// 而无名杀有上百处直接使用 localStorage(启动时 util/index.js 首行即调用)。
+		// 此处在任何模块加载前做兜底:不可用则替换为内存实现,保证游戏不因存储缺失而崩溃。
+		// 注意:内存版数据不跨会话持久化(刷新即失),但至少能正常游玩,不再报错白屏。
+		(function () {
+			"use strict";
+			function makeMemoryStorage() {
+				var store = Object.create(null);
+				return {
+					getItem: function (k) {
+						k = String(k);
+						return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null;
+					},
+					setItem: function (k, v) {
+						store[String(k)] = String(v);
+					},
+					removeItem: function (k) {
+						delete store[String(k)];
+					},
+					clear: function () {
+						store = Object.create(null);
+					},
+					key: function (i) {
+						return Object.keys(store)[i] ?? null;
+					},
+					get length() {
+						return Object.keys(store).length;
+					},
+				};
+			}
+			function usable(name) {
+				try {
+					var s = window[name];
+					if (!s) return false;
+					var probe = "__noname_probe__";
+					s.setItem(probe, "1");
+					s.removeItem(probe);
+					return true;
+				} catch (e) {
+					return false;
+				}
+			}
+			["localStorage", "sessionStorage"].forEach(function (name) {
+				if (!usable(name)) {
+					try {
+						Object.defineProperty(window, name, { value: makeMemoryStorage(), configurable: true });
+					} catch (e) {
+						// defineProperty 失败(极少数环境)时直接赋值兜底
+						try {
+							window[name] = makeMemoryStorage();
+						} catch (e2) {}
+					}
+				}
+			});
+		})();
+	</script>
 	<!-- PWA:可安装 / 独立窗口 / 离线 -->
 	<link rel="manifest" href="./manifest.webmanifest" />
 	<meta name="theme-color" content="#000000" />
