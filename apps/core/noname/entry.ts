@@ -47,18 +47,29 @@ https://www.gnu.org/licenses/gpl-3.0.html
 		}
 
 		await boot();
+		// 启动成功,清除重试标记
+		sessionStorage.removeItem("noname_boot_retried");
 	} catch (e) {
 		console.error(e);
+		// 纯静态/PWA 冷启动时,首次要并发拉取大量资源且 Service Worker 尚未接管,
+		// iOS Safari 下偶发请求失败导致启动中断(错误常为 undefined)。
+		// 自动重试一次:重载后 SW 已缓存资源,大概率成功。仅重试一次,避免死循环。
+		if (!sessionStorage.getItem("noname_boot_retried")) {
+			sessionStorage.setItem("noname_boot_retried", "1");
+			location.reload();
+			return;
+		}
+		sessionStorage.removeItem("noname_boot_retried");
+		const detail = e instanceof Error ? e.stack || e.message : e === undefined || e === null ? "(无错误详情,通常是网络加载资源失败,请检查网络后重新打开)" : String(e);
 		alert(`《无名杀》加载内容失败
-浏览器UA信息: 
+浏览器UA信息:
 ${userAgentLowerCase}
-错误信息: 
-${e instanceof Error ? e.stack : String(e)}
+错误信息:
+${detail}
 若您不理解该信息，请依次检查：
-1. 游戏文件是否完整（重新下载完整包）
-2. 客户端是否需要更新
+1. 网络是否正常（首次加载需联网下载资源）
+2. 游戏文件是否完整（重新下载完整包）
 3. 浏览器是否需要更新
-4. 若您直接打开index.html进行游戏，请改为运行文件夹内的noname-server.exe
-5. 若以上步骤均无法解决问题，请及时向开发组反馈`);
+4. 若以上步骤均无法解决问题，请及时向开发组反馈`);
 	}
 })();

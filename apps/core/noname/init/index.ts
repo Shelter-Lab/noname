@@ -24,7 +24,8 @@ export async function boot() {
 
 	await import("./polyfill.js");
 	// 设定游戏加载时间，超过时间未加载就提醒
-	const configLoadTime = parseInt(localStorage.getItem(lib.configprefix + "loadtime") || "10000");
+	// 纯静态部署(如 iOS PWA)首次需从 CDN 拉取全套资源,10 秒常不够会误弹"未正常载入",故放宽到 30 秒
+	const configLoadTime = parseInt(localStorage.getItem(lib.configprefix + "loadtime") || "30000");
 	// 现在不暴露到全局变量里了，直接传给onload
 	const resetGameTimeout = setTimeout(lib.init.reset, configLoadTime);
 
@@ -497,7 +498,7 @@ export async function boot() {
 		if (!splashInRemoing) {
 			node.remove();
 		}
-		window.resetGameTimeout = setTimeout(lib.init.reset, 10000);
+		window.resetGameTimeout = setTimeout(lib.init.reset, configLoadTime);
 		delete window.inSplash;
 		game.saveConfig("mode", result);
 		await importMode(result);
