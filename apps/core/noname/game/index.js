@@ -2450,6 +2450,9 @@ export class Game {
 		return new lib.element.Client(new lib.element.NodeWS(id), true).send(message);
 	}
 	createServer() {
+		// 纯浏览器/PWA 无 Electron 的 lib.node,但联机逻辑大量用 lib.node.clients 等,
+		// 故这里确保它存在(PeerJS 房主也需要 clients/torespond 等作为服务端状态容器)。
+		if (!lib.node) lib.node = {};
 		lib.node.clients = [];
 		lib.node.banned = [];
 		lib.node.observing = [];
