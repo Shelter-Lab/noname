@@ -58,6 +58,13 @@ self.addEventListener("install", event => {
 	);
 });
 
+// 收到页面"检查更新"发来的 SKIP_WAITING → 立即接管,让新版生效(配合手动检查更新按钮)
+self.addEventListener("message", event => {
+	if (event.data && event.data.type === "SKIP_WAITING") {
+		self.skipWaiting();
+	}
+});
+
 self.addEventListener("activate", event => {
 	event.waitUntil(
 		(async () => {
