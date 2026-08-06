@@ -104,10 +104,16 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 		var updatepx = ui.create.node("p");
 		updatepx.style.whiteSpace = "nowrap";
 		updatepx.style.marginTop = "8px";
-		var buttonx = ui.create.node("button", "访问项目主页", function () {
+		var buttonx = ui.create.node("button", "官方项目主页", function () {
 			window.open("https://github.com/libnoname/noname");
 		});
 		updatepx.appendChild(buttonx);
+		// 本 PWA 版(Shelter-Lab fork:纯静态可安装、离线、房间号联机)
+		var buttonFork = ui.create.node("button", "本 PWA 版主页", function () {
+			window.open("https://github.com/Shelter-Lab/noname");
+		});
+		buttonFork.style.marginLeft = "8px";
+		updatepx.appendChild(buttonFork);
 
 		ul.appendChild(li1);
 		ul.appendChild(li3);
