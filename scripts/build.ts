@@ -105,12 +105,12 @@ console.log("生成 PWA 资源清单");
 	console.log(`  可下载资源清单: ${heavy.length} 文件`);
 }
 
-// 生成 PWA 构建版本戳(YYYYMMDDHHmm 格式),用于界面上确认当前跑的是哪个构建。
-// pwa-sw 更新后用户可在"检查更新"旁看到版本号,一目了然有没有刷到最新。
+// 生成 PWA 构建版本戳(YYYYMMDDHHmm 北京时间),用于界面上确认当前跑的是哪个构建。
+// CF 构建服务器在 UTC,加 8 小时转北京时间,用户看到的时间与 push 时间一致。
 {
-	const now = new Date();
+	const now = new Date(Date.now() + 8 * 3600_000); // UTC+8 北京时间
 	const pad = (n: number) => String(n).padStart(2, "0");
-	const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}`;
+	const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}`;
 	await fs.writeFile("dist/pwa-version.json", JSON.stringify({ build: stamp }));
-	console.log(`  构建版本戳: ${stamp}`);
+	console.log(`  构建版本戳: ${stamp} (北京时间)`);
 }
