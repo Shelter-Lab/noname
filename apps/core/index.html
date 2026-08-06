@@ -77,7 +77,18 @@
 	<script>
 		// 注册 PWA Service Worker(离线缓存)。失败不影响游戏运行。
 		if ("serviceWorker" in navigator) {
-			window.addEventListener("load", () => {
+			window.addEventListener("load", async () => {
+				// 一次性清理：旧版误注册的 JIT service-worker.js 会抢占 scope 导致白屏，
+				// 找到它并注销掉，让 pwa-sw.js 重新接管。
+				try {
+					const regs = await navigator.serviceWorker.getRegistrations();
+					for (const reg of regs) {
+						if (reg.active && reg.active.scriptURL.endsWith('/service-worker.js')) {
+							await reg.unregister();
+							console.log('[PWA] 已注销残留的 JIT service-worker.js');
+						}
+					}
+				} catch (e) { /* ignore */ }
 				navigator.serviceWorker.register("./pwa-sw.js").catch(err => console.warn("PWA SW 注册失败:", err));
 			});
 		}
