@@ -204,14 +204,10 @@ export default () => {
 						ui.window.removeChild(input);
 						if (result || input.value.length > 0) {
 							read(input.value);
-						} else if (confirm("是否输入邀请链接以进入联机地址和房间？")) {
-							ced = true;
-							game.prompt("请输入邀请链接", text => {
-								if (typeof text === "string" && text.length > 0) {
-									read(text);
-								}
-							});
 						}
+						// 纯浏览器/PWA 下不再主动弹"是否输入邀请链接"confirm——
+						// PWA 用户走"创建房间/输房间号"流程,这个每次进联机都弹的弹窗是干扰。
+						// (Electron 端有 navigator.clipboard 会走上面的自动读取分支,不到这里)
 					}
 				}
 				lib.init.onfree();

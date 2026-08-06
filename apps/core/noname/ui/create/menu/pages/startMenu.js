@@ -20,6 +20,8 @@ export const startMenu = function (connectMenu) {
 			return;
 		}
 		var active = this.parentNode.querySelector(".active");
+		// [临时诊断] 定位"点创建房间→选模式→点启直接开单机"的 bug,确认后删除
+		console.log("[联机诊断] 点启:connectMenu =", connectMenu, "| active =", active && active.mode, "| _status.connectMode =", _status.connectMode, "| lib.config.mode =", lib.config.mode, "| waitingForPlayer =", _status.waitingForPlayer);
 		if (active) {
 			if (connectMenu) {
 				if (_status.waitingForPlayer) {
