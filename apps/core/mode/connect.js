@@ -26,9 +26,22 @@ export default () => {
 					game.switchMode(directstartmode);
 					return;
 				}
+				// Electron/Node:原生开服;纯浏览器/PWA:PeerJS 开房(房间号)。
+				// 两者都进 connectMenu 选模式点"启",后续 waitForPlayer→createServer 已按环境分流。
 				if (lib.node && window.require) {
 					ui.startServer = ui.create.system(
 						"启动服务器",
+						function (e) {
+							ui.click.shortcut(false);
+							e.stopPropagation();
+							ui.click.connectMenu();
+						},
+						true
+					);
+				} else if (typeof RTCPeerConnection === "function") {
+					// 浏览器支持 WebRTC → 允许当房主(PeerJS)
+					ui.startServer = ui.create.system(
+						"创建房间",
 						function (e) {
 							ui.click.shortcut(false);
 							e.stopPropagation();

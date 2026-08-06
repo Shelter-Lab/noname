@@ -60,8 +60,8 @@ export class LibInit {
 
 			setText(`下载中 ${done}/${total}`);
 
-			// 并发受控地逐批下载
-			const CONCURRENCY = 6;
+			// 并发受控地逐批下载(CF 走 HTTP/2 多路复用,12 并发可用且更快)
+			const CONCURRENCY = 12;
 			for (let i = 0; i < pending.length; i += CONCURRENCY) {
 				if (lib.init._offlineDownloadAbort) break;
 				const batch = pending.slice(i, i + CONCURRENCY);
