@@ -68,7 +68,15 @@ export class LibInit {
 				const results = await Promise.allSettled(
 					batch.map(async url => {
 						const r = await fetch(url, { cache: "no-cache" });
-						if (r && r.status === 200) await cache.put(url, r.clone());
+						if (r && r.status === 200) {
+							// iOS 不接受 redirected 响应:重定向的先用响应体重建干净副本再缓存
+							let toCache = r.clone();
+							if (r.redirected) {
+								const body = await r.clone().blob();
+								toCache = new Response(body, { status: r.status, statusText: r.statusText, headers: r.headers });
+							}
+							await cache.put(url, toCache);
+						}
 					})
 				);
 				for (const res of results) {
