@@ -125,6 +125,21 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 			var updateCheckPx = ui.create.node("p");
 			updateCheckPx.style.whiteSpace = "nowrap";
 			updateCheckPx.style.marginTop = "8px";
+
+			// 版本戳:显示当前构建时间(YYYYMMDDHHmm),便于确认是否已更新到最新
+			var versionSpan = document.createElement("span");
+			versionSpan.style.cssText = "font-size:12px;color:#888;margin-left:8px;font-variant-numeric:tabular-nums;";
+			versionSpan.textContent = "";
+			function loadVersionStamp() {
+				fetch("./pwa-version.json", { cache: "no-cache" })
+					.then(function (r) { return r.ok ? r.json() : null; })
+					.then(function (data) {
+						if (data && data.build) versionSpan.textContent = "v" + data.build;
+					})
+					.catch(function () {});
+			}
+			loadVersionStamp();
+
 			var checkUpdateBtn = ui.create.node("button", "检查更新", async function () {
 				var btn = this;
 				btn.textContent = "检查中…";
@@ -149,6 +164,8 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 						// 若已经是 waiting 状态(装好没接管),催它跳过等待
 						if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
 					} else {
+						// 已是最新:重新拉版本戳,确认显示的号码是当前真正在跑的
+						loadVersionStamp();
 						alert("已是最新版本。");
 					}
 				} catch (e) {
@@ -160,6 +177,7 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 				}
 			});
 			updateCheckPx.appendChild(checkUpdateBtn);
+			updateCheckPx.appendChild(versionSpan);
 			ul.appendChild(updateCheckPx);
 		}
 

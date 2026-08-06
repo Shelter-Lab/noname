@@ -70,7 +70,7 @@ console.log("生成 PWA 资源清单");
 	// 核心:启动 + 标准对局必需的代码/UI/数据(不含花体字、武将立绘、语音)。
 	// 由 SW 在 install 阶段预缓存,保证断网也能稳定启动、进模式、玩标准局。
 	const coreDirs = ["noname", "_virtual", "node_modules", "layout", "theme", "game", "mode", "card", "character"];
-	const core = new Set<string>(["./index.html", "./noname.js", "./manifest.webmanifest"]);
+	const core = new Set<string>(["./index.html", "./noname.js", "./manifest.webmanifest", "./pwa-version.json"]);
 	for (const d of coreDirs) {
 		for (const f of await listAssets(d)) core.add(f);
 	}
@@ -103,4 +103,14 @@ console.log("生成 PWA 资源清单");
 	await fs.writeFile("dist/pwa-all-assets.json", JSON.stringify(heavy.sort()));
 	console.log(`  核心预缓存清单: ${coreList.length} 文件`);
 	console.log(`  可下载资源清单: ${heavy.length} 文件`);
+}
+
+// 生成 PWA 构建版本戳(YYYYMMDDHHmm 格式),用于界面上确认当前跑的是哪个构建。
+// pwa-sw 更新后用户可在"检查更新"旁看到版本号,一目了然有没有刷到最新。
+{
+	const now = new Date();
+	const pad = (n: number) => String(n).padStart(2, "0");
+	const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}`;
+	await fs.writeFile("dist/pwa-version.json", JSON.stringify({ build: stamp }));
+	console.log(`  构建版本戳: ${stamp}`);
 }

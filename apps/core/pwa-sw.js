@@ -98,6 +98,28 @@ self.addEventListener("fetch", event => {
 	// 其余只处理同源 GET
 	if (req.method !== "GET") return;
 
+	// pwa-version.json 用 Network-First:检查更新时必须拿到最新版本号,
+	// 离线时 fallback 到缓存(显示上次已知版本)。
+	if (url.pathname.endsWith("/pwa-version.json")) {
+		event.respondWith(
+			(async () => {
+				const cache = await caches.open(CACHE);
+				try {
+					const resp = await fetch(req);
+					if (resp && resp.status === 200) {
+						const clean = await sanitizeResponse(resp.clone());
+						cache.put(req, clean);
+					}
+					return await sanitizeResponse(resp);
+				} catch {
+					const cached = await cache.match(req);
+					return cached || new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+				}
+			})()
+		);
+		return;
+	}
+
 	event.respondWith(
 		(async () => {
 			const cache = await caches.open(CACHE);
