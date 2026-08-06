@@ -13,6 +13,95 @@ export class LibInit {
 		return this.#promises;
 	}
 
+	/**
+	 * 一键下载离线资源:把 pwa-all-assets.json 列出的全部大素材(立绘/语音/扩展/花体字)
+	 * 批量缓存到 Service Worker 的 Cache Storage,之后断网也能玩。
+	 * - 跳过已缓存文件,支持中断后续传(再次点击从未缓存处继续)
+	 * - 实时在按钮上显示进度;再次点击可暂停
+	 * - 捕获配额超限(iOS 有上限),优雅停止并告知已缓存量
+	 * @param {HTMLElement} button 触发的按钮元素(用于显示进度)
+	 */
+	async downloadOfflineAssets(button) {
+		// 已在下载 → 再次点击视为暂停
+		if (lib.init._offlineDownloading) {
+			lib.init._offlineDownloadAbort = true;
+			return;
+		}
+		if (!("caches" in window)) {
+			alert("当前环境不支持离线缓存(Cache Storage 不可用)。");
+			return;
+		}
+
+		const setText = text => {
+			if (button) button.innerHTML = `<span>${text}</span>`;
+		};
+
+		lib.init._offlineDownloading = true;
+		lib.init._offlineDownloadAbort = false;
+		setText("准备中…");
+
+		try {
+			const resp = await fetch("./pwa-all-assets.json", { cache: "no-cache" });
+			if (!resp.ok) throw new Error("资源清单获取失败 " + resp.status);
+			/** @type {string[]} */
+			const all = await resp.json();
+			const cache = await caches.open("noname-pwa-v1");
+
+			// 计算待下载(跳过已缓存)以支持续传
+			const pending = [];
+			for (const url of all) {
+				if (lib.init._offlineDownloadAbort) break;
+				const hit = await cache.match(url);
+				if (!hit) pending.push(url);
+			}
+			const total = all.length;
+			let done = total - pending.length; // 已缓存的算作已完成
+			let quotaExceeded = false;
+
+			setText(`下载中 ${done}/${total}`);
+
+			// 并发受控地逐批下载
+			const CONCURRENCY = 6;
+			for (let i = 0; i < pending.length; i += CONCURRENCY) {
+				if (lib.init._offlineDownloadAbort) break;
+				const batch = pending.slice(i, i + CONCURRENCY);
+				const results = await Promise.allSettled(
+					batch.map(async url => {
+						const r = await fetch(url, { cache: "no-cache" });
+						if (r && r.status === 200) await cache.put(url, r.clone());
+					})
+				);
+				for (const res of results) {
+					if (res.status === "fulfilled") {
+						done++;
+					} else if (res.reason && (res.reason.name === "QuotaExceededError" || String(res.reason).includes("quota"))) {
+						quotaExceeded = true;
+					}
+				}
+				setText(`下载中 ${done}/${total}`);
+				if (quotaExceeded) break;
+			}
+
+			if (quotaExceeded) {
+				alert(`已达设备缓存容量上限,离线资源部分缓存(${done}/${total})。\niOS 对网页缓存有容量限制,已缓存内容可离线使用。`);
+				setText("下载离线资源");
+			} else if (lib.init._offlineDownloadAbort) {
+				alert(`已暂停。当前已缓存 ${done}/${total},再次点击可继续。`);
+				setText("下载离线资源");
+			} else {
+				alert(`离线资源下载完成(${done}/${total})!断网也能玩了。`);
+				setText("已下载离线资源");
+			}
+		} catch (e) {
+			console.error("下载离线资源失败:", e);
+			alert("下载离线资源失败:" + (e instanceof Error ? e.message : String(e)));
+			setText("下载离线资源");
+		} finally {
+			lib.init._offlineDownloading = false;
+			lib.init._offlineDownloadAbort = false;
+		}
+	}
+
 	reset() {
 		if (window.inSplash) {
 			return;

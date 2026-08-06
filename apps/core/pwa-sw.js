@@ -14,7 +14,28 @@ const CACHE = "noname-pwa-v1";
 const BYPASS = ["/checkFile", "/checkDir", "/readFile", "/readFileAsText", "/writeFile", "/removeFile", "/getFileList", "/createDir", "/removeDir"];
 
 self.addEventListener("install", event => {
-	self.skipWaiting();
+	// install 阶段预缓存"启动+标准对局必需"的核心文件(约 32MB,清单由构建生成)。
+	// 保证断网时也能稳定启动、进模式、玩标准局。失败不阻塞安装(降级为访问即缓存)。
+	event.waitUntil(
+		(async () => {
+			try {
+				const resp = await fetch("./pwa-core-assets.json", { cache: "no-cache" });
+				if (!resp.ok) throw new Error("核心清单获取失败 " + resp.status);
+				const list = await resp.json();
+				const cache = await caches.open(CACHE);
+				// 分批 addAll,避免一次性数百请求压垮 iOS;单批失败不影响其余
+				const BATCH = 50;
+				for (let i = 0; i < list.length; i += BATCH) {
+					const batch = list.slice(i, i + BATCH);
+					await Promise.allSettled(batch.map(url => cache.add(new Request(url, { cache: "no-cache" }))));
+				}
+			} catch (e) {
+				// 预缓存失败不致命:后续靠 fetch 事件的访问即缓存兜底
+				console.warn("[pwa-sw] 核心预缓存未完成:", e);
+			}
+			await self.skipWaiting();
+		})()
+	);
 });
 
 self.addEventListener("activate", event => {

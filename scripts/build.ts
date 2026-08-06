@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
+import path from "node:path";
 
 /** 执行子命令,非 0 退出码立即终止并报清楚是哪条命令失败 */
 function run(cmd: string) {
@@ -8,6 +9,32 @@ function run(cmd: string) {
 	if (r.status !== 0) {
 		throw new Error(`构建命令失败(退出码 ${r.status}): ${cmd}`);
 	}
+}
+
+/**
+ * 递归列出 dist 下某目录内所有文件,返回相对 dist 根、以 ./ 开头的 URL 路径。
+ * @param {string} dir 相对 dist 的子目录(如 "image");为空则整个 dist
+ */
+async function listAssets(dir: string): Promise<string[]> {
+	const root = "dist";
+	const abs = dir ? path.join(root, dir) : root;
+	if (!existsSync(abs)) return [];
+	const out: string[] = [];
+	async function walk(cur: string) {
+		const entries = await fs.readdir(cur, { withFileTypes: true });
+		for (const e of entries) {
+			const full = path.join(cur, e.name);
+			if (e.isDirectory()) {
+				await walk(full);
+			} else if (e.isFile()) {
+				// 转成相对 dist 根的 URL(正斜杠,以 ./ 开头)
+				const rel = path.relative(root, full).split(path.sep).join("/");
+				out.push("./" + rel);
+			}
+		}
+	}
+	await walk(abs);
+	return out;
 }
 
 // 先显式构建本体(core,包名 noname)及其工作区依赖(fs/jit)。
@@ -36,3 +63,34 @@ await Promise.all([
 	fs.cp("apps/core/manifest.webmanifest", "dist/manifest.webmanifest"),
 	fs.cp("apps/core/pwa-sw.js", "dist/pwa-sw.js")
 ]);
+
+// 生成 PWA 离线资源清单(供 SW 预缓存 + 游戏内一键下载使用)
+console.log("生成 PWA 资源清单");
+{
+	// 核心:启动 + 标准对局必需的代码/UI/数据(不含花体字、武将立绘、语音)。
+	// 由 SW 在 install 阶段预缓存,保证断网也能稳定启动、进模式、玩标准局。
+	const coreDirs = ["noname", "_virtual", "node_modules", "layout", "theme", "game", "mode", "card", "character"];
+	const core = new Set<string>(["./index.html", "./noname.js", "./manifest.webmanifest"]);
+	for (const d of coreDirs) {
+		for (const f of await listAssets(d)) core.add(f);
+	}
+	// 花色/基础字体符号属核心(界面必用),花体字(xinwei/yuanli 等大文件)不算核心
+	for (const f of await listAssets("font")) {
+		if (/\/(suits|motoyamaru)\.woff2$/.test(f)) core.add(f);
+	}
+
+	// 全量可下载:核心之外的大素材(立绘、语音、内置扩展、花体字)。
+	// 由游戏内"下载离线资源"按钮按需批量缓存,可中断续传。
+	const heavy: string[] = [];
+	for (const d of ["image", "audio", "extension", "font"]) {
+		for (const f of await listAssets(d)) {
+			if (!core.has(f)) heavy.push(f);
+		}
+	}
+
+	const coreList = [...core].sort();
+	await fs.writeFile("dist/pwa-core-assets.json", JSON.stringify(coreList));
+	await fs.writeFile("dist/pwa-all-assets.json", JSON.stringify(heavy.sort()));
+	console.log(`  核心预缓存清单: ${coreList.length} 文件`);
+	console.log(`  可下载资源清单: ${heavy.length} 文件`);
+}
