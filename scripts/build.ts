@@ -74,6 +74,16 @@ console.log("生成 PWA 资源清单");
 	for (const d of coreDirs) {
 		for (const f of await listAssets(d)) core.add(f);
 	}
+	// dist 根目录的启动必需散文件(jit-test.ts、service-worker.js 等 JIT 编译入口、entry)。
+	// 之前只扫子目录漏了它们 → 断网时这几个没缓存 → JIT worker 加载失败 → 白屏。
+	// 排除仅开发/文档用的散文件(清单本身、README、LICENSE、图标已单列)。
+	for (const f of await listAssets("")) {
+		// listAssets("") 返回全 dist,只挑根目录一层的 .js/.ts
+		const rel = f.replace(/^\.\//, "");
+		if (!rel.includes("/") && /\.(js|ts)$/.test(rel) && !rel.startsWith("pwa-")) {
+			core.add(f);
+		}
+	}
 	// 花色/基础字体符号属核心(界面必用),花体字(xinwei/yuanli 等大文件)不算核心
 	for (const f of await listAssets("font")) {
 		if (/\/(suits|motoyamaru)\.woff2$/.test(f)) core.add(f);
