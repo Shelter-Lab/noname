@@ -22,24 +22,18 @@ export class LibInit {
 	 * @param {HTMLElement} button 触发的按钮元素(用于显示进度)
 	 */
 	async downloadOfflineAssets(button) {
-		const DONE_FLAG = "noname_offline_assets_done";
-
 		const setText = text => {
 			if (button) button.innerHTML = `<span>${text}</span>`;
 		};
 
-		// 已完整下载过 → 直接锁定,不再执行(避免重复触发缓存校验循环导致 iOS 白屏)。
-		// 中断/未完成的不打此标记,故仍可再次点击续传。
-		if (localStorage.getItem(DONE_FLAG)) {
-			setText("已下载离线资源");
-			alert("离线资源已全部下载完成,无需重复下载。");
-			return;
-		}
 		// 已在下载 → 再次点击视为暂停
 		if (lib.init._offlineDownloading) {
 			lib.init._offlineDownloadAbort = true;
 			return;
 		}
+		// 不再用"完成标记"永久锁定:核对已改用 cache.keys() 批量比对(高效,不会白屏),
+		// 每次点击都重新核对→只补缺失的文件(增量续传)。这样清单更新后(如新增 jit-test.ts)
+		// 能"补课"下新文件,而已缓存的 1GB 素材不会重下。全在则秒提示"已完成"。
 		if (!("caches" in window)) {
 			alert("当前环境不支持离线缓存(Cache Storage 不可用)。");
 			return;
@@ -50,10 +44,14 @@ export class LibInit {
 		setText("准备中…");
 
 		try {
-			const resp = await fetch("./pwa-all-assets.json", { cache: "no-cache" });
-			if (!resp.ok) throw new Error("资源清单获取失败 " + resp.status);
+			// 合并核心清单 + 全量清单一起核对,确保核心里的启动必需文件(jit-test.ts 等)
+			// 若缺失也能被"补课"下载,而不只是下大素材。
+			const [coreResp, allResp] = await Promise.all([fetch("./pwa-core-assets.json", { cache: "no-cache" }), fetch("./pwa-all-assets.json", { cache: "no-cache" })]);
+			if (!allResp.ok) throw new Error("资源清单获取失败 " + allResp.status);
+			const coreList = coreResp.ok ? await coreResp.json() : [];
+			const allList = await allResp.json();
 			/** @type {string[]} */
-			const all = await resp.json();
+			const all = [...new Set([...coreList, ...allList])];
 			// 缓存桶名须与 pwa-sw.js 的 CACHE 一致,否则下载的内容 SW 读不到
 			const cache = await caches.open("noname-pwa-v2");
 
@@ -70,6 +68,14 @@ export class LibInit {
 			const total = all.length;
 			let done = total - pending.length; // 已缓存的算作已完成
 			let quotaExceeded = false;
+
+			// 核对后已全部缓存 → 秒提示,不走下载循环
+			if (pending.length === 0) {
+				setText("已下载离线资源");
+				alert(`离线资源已全部缓存(${total}/${total}),断网也能玩。`);
+				lib.init._offlineDownloading = false;
+				return;
+			}
 
 			setText(`下载中 ${done}/${total}`);
 
@@ -110,8 +116,6 @@ export class LibInit {
 				alert(`已暂停。当前已缓存 ${done}/${total},再次点击可继续。`);
 				setText("下载离线资源");
 			} else {
-				// 真正全部下完:打持久标记,之后再点直接锁定不重复执行(防白屏)
-				localStorage.setItem(DONE_FLAG, "1");
 				alert(`离线资源下载完成(${done}/${total})!断网也能玩了。`);
 				setText("已下载离线资源");
 			}
