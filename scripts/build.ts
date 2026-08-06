@@ -105,12 +105,12 @@ console.log("生成 PWA 资源清单");
 	console.log(`  可下载资源清单: ${heavy.length} 文件`);
 }
 
-// 生成 PWA 构建版本戳(YYMMDD 北京时间日期),用于界面上确认当前跑的是哪个构建。
-// CF 构建服务器在 UTC,加 8 小时转北京时间。一天内多次部署看 git log 区分即可。
+// 生成 PWA 构建版本戳(YYMMDDHHmm 北京时间),用于界面上确认当前跑的是哪个构建。
+// CF 构建服务器在 UTC,加 8 小时转北京时间,用户看到的数字与 push 时间对得上。
 {
 	const now = new Date(Date.now() + 8 * 3600_000); // UTC+8 北京时间
 	const pad = (n: number) => String(n).padStart(2, "0");
-	const stamp = `${String(now.getUTCFullYear()).slice(2)}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
+	const stamp = `${String(now.getUTCFullYear()).slice(2)}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}`;
 	await fs.writeFile("dist/pwa-version.json", JSON.stringify({ build: stamp }));
 	console.log(`  构建版本戳: ${stamp} (北京时间)`);
 }
