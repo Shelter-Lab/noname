@@ -22,6 +22,19 @@ export class LibInit {
 	 * @param {HTMLElement} button 触发的按钮元素(用于显示进度)
 	 */
 	async downloadOfflineAssets(button) {
+		const DONE_FLAG = "noname_offline_assets_done";
+
+		const setText = text => {
+			if (button) button.innerHTML = `<span>${text}</span>`;
+		};
+
+		// 已完整下载过 → 直接锁定,不再执行(避免重复触发缓存校验循环导致 iOS 白屏)。
+		// 中断/未完成的不打此标记,故仍可再次点击续传。
+		if (localStorage.getItem(DONE_FLAG)) {
+			setText("已下载离线资源");
+			alert("离线资源已全部下载完成,无需重复下载。");
+			return;
+		}
 		// 已在下载 → 再次点击视为暂停
 		if (lib.init._offlineDownloading) {
 			lib.init._offlineDownloadAbort = true;
@@ -32,10 +45,6 @@ export class LibInit {
 			return;
 		}
 
-		const setText = text => {
-			if (button) button.innerHTML = `<span>${text}</span>`;
-		};
-
 		lib.init._offlineDownloading = true;
 		lib.init._offlineDownloadAbort = false;
 		setText("准备中…");
@@ -45,15 +54,19 @@ export class LibInit {
 			if (!resp.ok) throw new Error("资源清单获取失败 " + resp.status);
 			/** @type {string[]} */
 			const all = await resp.json();
-			const cache = await caches.open("noname-pwa-v1");
+			// 缓存桶名须与 pwa-sw.js 的 CACHE 一致,否则下载的内容 SW 读不到
+			const cache = await caches.open("noname-pwa-v2");
 
-			// 计算待下载(跳过已缓存)以支持续传
-			const pending = [];
-			for (const url of all) {
-				if (lib.init._offlineDownloadAbort) break;
-				const hit = await cache.match(url);
-				if (!hit) pending.push(url);
-			}
+			// 计算待下载(跳过已缓存)以支持续传。
+			// 用 cache.keys() 一次性取全部已缓存 URL 做成 Set 再比对——
+			// 避免逐个 await cache.match(1.4万次)的密集查询把 iOS 主线程搞崩(下载完再点会白屏)。
+			const cachedKeys = await cache.keys();
+			const cachedSet = new Set(cachedKeys.map(r => new URL(r.url).pathname));
+			const pending = all.filter(url => {
+				// 清单里是 "./image/x.png",缓存 key 是完整 URL,统一用 pathname 比对
+				const path = new URL(url, location.href).pathname;
+				return !cachedSet.has(path);
+			});
 			const total = all.length;
 			let done = total - pending.length; // 已缓存的算作已完成
 			let quotaExceeded = false;
@@ -97,6 +110,8 @@ export class LibInit {
 				alert(`已暂停。当前已缓存 ${done}/${total},再次点击可继续。`);
 				setText("下载离线资源");
 			} else {
+				// 真正全部下完:打持久标记,之后再点直接锁定不重复执行(防白屏)
+				localStorage.setItem(DONE_FLAG, "1");
 				alert(`离线资源下载完成(${done}/${total})!断网也能玩了。`);
 				setText("已下载离线资源");
 			}
