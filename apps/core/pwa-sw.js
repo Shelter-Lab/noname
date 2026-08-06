@@ -13,6 +13,20 @@ const CACHE = "noname-pwa-v2";
 // 这些运行期动态接口即使残留也绝不缓存(纯静态部署下不存在,双保险)
 const BYPASS = ["/checkFile", "/checkDir", "/readFile", "/readFileAsText", "/writeFile", "/removeFile", "/getFileList", "/createDir", "/removeDir"];
 
+// Safari/WebKit 断网时 fetch() 不像 Chromium 那样立即 reject,
+// 而是长时间 pending 甚至永远不返回。给所有 SW 内的 fetch 加超时保护,
+// 超时后 abort → reject → 走缓存/504 兜底,避免白屏卡死。
+function fetchSafe(input, init, ms = 8000) {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), ms);
+	const signal = init?.signal
+		? init.signal  // 外部已有 signal 则不覆盖
+		: controller.signal;
+	return fetch(input, { ...init, signal })
+		.then(r => { clearTimeout(timer); return r; })
+		.catch(e => { clearTimeout(timer); throw e; });
+}
+
 // iOS Safari 禁止 Service Worker 返回"经过重定向的响应"(response.redirected=true),
 // 否则整页报错 "Response served by service worker has redirections" 白屏。
 // CF Workers Static Assets 会把 /index.html 307 重定向到 /,故必须把这类响应"洗白"
@@ -97,8 +111,8 @@ self.addEventListener("fetch", event => {
 					|| await cache.match("/index.html")
 					|| await cache.match("./index.html");
 
-				// 后台静默网络更新(fire-and-forget,Safari 断网挂住也无所谓)
-				const bgUpdate = fetch(req)
+				// 后台静默网络更新(fetchSafe 带超时,Safari 断网不会永久挂)
+				const bgUpdate = fetchSafe(req)
 					.then(async resp => {
 						if (resp && resp.status === 200) {
 							cache.put(req, await sanitizeResponse(resp.clone()));
@@ -144,7 +158,7 @@ self.addEventListener("fetch", event => {
 			(async () => {
 				const cache = await caches.open(CACHE);
 				try {
-					const resp = await fetch(req);
+					const resp = await fetchSafe(req);
 					if (resp && resp.status === 200) {
 						const clean = await sanitizeResponse(resp.clone());
 						cache.put(req, clean);
@@ -164,8 +178,8 @@ self.addEventListener("fetch", event => {
 			const cache = await caches.open(CACHE);
 			const cached = await cache.match(req);
 
-			// 后台拉取并更新缓存
-			const fetchAndUpdate = fetch(req)
+			// 后台拉取并更新缓存(fetchSafe 带超时,Safari 断网不会永久挂)
+			const fetchAndUpdate = fetchSafe(req)
 				.then(async resp => {
 					// 只缓存成功的完整响应(200)。不透明响应(跨源)已被上面过滤
 					if (resp && resp.status === 200) {
