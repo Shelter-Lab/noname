@@ -82,6 +82,39 @@ self.addEventListener("fetch", event => {
 	const url = new URL(req.url);
 	if (url.origin !== self.location.origin) return;
 
+	// ===== 导航请求(打开/刷新页面)：Network-First + App Shell 兜底 =====
+	// iOS standalone PWA 冷启动时 SW 可能被系统杀过再唤醒,若网络不可达且
+	// 用常规 SWR(先查缓存 key 精确匹配)容易因 URL 细微差异(/ vs /index.html
+	// vs /?utm=xxx)miss 缓存 → iOS 弹系统级"无网络"页。
+	// 改为:导航请求先尝试网络,失败则返回缓存的 /index.html(App Shell 兜底),
+	// 无论用户实际请求的 URL 是什么,都能拿到首页壳 → JS 接管后续路由。
+	if (req.mode === "navigate") {
+		event.respondWith(
+			(async () => {
+				try {
+					const resp = await fetch(req);
+					// 成功:缓存一份(洗白重定向),供下次离线用
+					if (resp && resp.status === 200) {
+						const cache = await caches.open(CACHE);
+						cache.put(req, (await sanitizeResponse(resp.clone())));
+					}
+					return await sanitizeResponse(resp);
+				} catch {
+					// 网络失败(离线):从缓存取 index.html 作为 App Shell 兜底
+					const cache = await caches.open(CACHE);
+					// 按优先级尝试多种可能的 key(不同缓存路径)
+					const shell = await cache.match("/index.html")
+						|| await cache.match("/")
+						|| await cache.match("./index.html")
+						|| await cache.match(req);
+					if (shell) return await sanitizeResponse(shell);
+					return new Response("离线且未缓存首页", { status: 504 });
+				}
+			})()
+		);
+		return;
+	}
+
 	// 文件服务器接口:纯静态部署下不存在。SW 立即返回失败,避免离线时
 	// browser.js 的 fetch('/checkFile'...) 干等网络超时导致启动白屏几十秒。
 	// (返回 {success:false} 让 browser.js 秒判定为纯静态模式)

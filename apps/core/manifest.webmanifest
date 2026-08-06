@@ -3,7 +3,7 @@
 	"short_name": "无名杀",
 	"description": "开源三国杀 · 单机离线可玩",
 	"lang": "zh-CN",
-	"start_url": "./index.html",
+	"start_url": "/",
 	"scope": "./",
 	"display": "standalone",
 	"orientation": "landscape",
