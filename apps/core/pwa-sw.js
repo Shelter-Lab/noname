@@ -82,34 +82,40 @@ self.addEventListener("fetch", event => {
 	const url = new URL(req.url);
 	if (url.origin !== self.location.origin) return;
 
-	// ===== 导航请求(打开/刷新页面)：Network-First + App Shell 兜底 =====
-	// iOS standalone PWA 冷启动时 SW 可能被系统杀过再唤醒,若网络不可达且
-	// 用常规 SWR(先查缓存 key 精确匹配)容易因 URL 细微差异(/ vs /index.html
-	// vs /?utm=xxx)miss 缓存 → iOS 弹系统级"无网络"页。
-	// 改为:导航请求先尝试网络,失败则返回缓存的 /index.html(App Shell 兜底),
-	// 无论用户实际请求的 URL 是什么,都能拿到首页壳 → JS 接管后续路由。
+	// ===== 导航请求(打开/刷新页面)：Cache-First + 多 key 兜底 =====
+	// Safari/WebKit 断网时 fetch() 不会立即 reject(不像 Chromium 秒失败),
+	// 而是长时间 pending → 如果用 Network-First 会卡死白屏。
+	// 所以导航也走 Cache-First(SWR):有缓存秒返回,后台静默更新;
+	// 额外加多 key 匹配兜底,防 / vs /index.html 等 URL 差异导致 miss。
 	if (req.mode === "navigate") {
 		event.respondWith(
 			(async () => {
-				try {
-					const resp = await fetch(req);
-					// 成功:缓存一份(洗白重定向),供下次离线用
-					if (resp && resp.status === 200) {
-						const cache = await caches.open(CACHE);
-						cache.put(req, (await sanitizeResponse(resp.clone())));
-					}
-					return await sanitizeResponse(resp);
-				} catch {
-					// 网络失败(离线):从缓存取 index.html 作为 App Shell 兜底
-					const cache = await caches.open(CACHE);
-					// 按优先级尝试多种可能的 key(不同缓存路径)
-					const shell = await cache.match("/index.html")
-						|| await cache.match("/")
-						|| await cache.match("./index.html")
-						|| await cache.match(req);
-					if (shell) return await sanitizeResponse(shell);
-					return new Response("离线且未缓存首页", { status: 504 });
+				const cache = await caches.open(CACHE);
+				// 多 key 尝试:缓存里 URL 可能是 /、/index.html、./index.html 中的任一种
+				const cached = await cache.match(req)
+					|| await cache.match("/")
+					|| await cache.match("/index.html")
+					|| await cache.match("./index.html");
+
+				// 后台静默网络更新(fire-and-forget,Safari 断网挂住也无所谓)
+				const bgUpdate = fetch(req)
+					.then(async resp => {
+						if (resp && resp.status === 200) {
+							cache.put(req, await sanitizeResponse(resp.clone()));
+						}
+						return resp;
+					})
+					.catch(() => null);
+
+				if (cached) {
+					bgUpdate; // 不 await,后台更新
+					return await sanitizeResponse(cached);
 				}
+
+				// 没缓存:只能等网络(首次访问必须联网)
+				const fresh = await bgUpdate;
+				if (fresh) return await sanitizeResponse(fresh);
+				return new Response("离线且未缓存首页", { status: 504 });
 			})()
 		);
 		return;
