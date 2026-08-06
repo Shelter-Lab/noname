@@ -43,6 +43,10 @@ export class LibInit {
 		lib.init._offlineDownloadAbort = false;
 		setText("准备中…");
 
+		// 下载期间拦截页面关闭/刷新,防止误触中断导致白屏
+		const beforeUnloadHandler = e => { e.preventDefault(); e.returnValue = ""; };
+		window.addEventListener("beforeunload", beforeUnloadHandler);
+
 		try {
 			// 合并核心清单 + 全量清单一起核对,确保核心里的启动必需文件(jit-test.ts 等)
 			// 若缺失也能被"补课"下载,而不只是下大素材。
@@ -126,6 +130,7 @@ export class LibInit {
 		} finally {
 			lib.init._offlineDownloading = false;
 			lib.init._offlineDownloadAbort = false;
+			window.removeEventListener("beforeunload", beforeUnloadHandler);
 		}
 	}
 
