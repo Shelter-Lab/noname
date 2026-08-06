@@ -16,7 +16,7 @@ const BYPASS = ["/checkFile", "/checkDir", "/readFile", "/readFileAsText", "/wri
 // Safari/WebKit 断网时 fetch() 不像 Chromium 那样立即 reject,
 // 而是长时间 pending 甚至永远不返回。给所有 SW 内的 fetch 加超时保护,
 // 超时后 abort → reject → 走缓存/504 兜底,避免白屏卡死。
-function fetchSafe(input, init, ms = 8000) {
+function fetchSafe(input, init, ms = 2000) {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), ms);
 	const signal = init?.signal
