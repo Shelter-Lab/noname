@@ -4979,6 +4979,11 @@ ${e instanceof Error ? e.stack : String(e)}`);
 		},
 	};
 	reload() {
+		// 离线资源下载中禁止 reload,防止中断缓存写入导致进度丢失+白屏
+		if (lib.init._offlineDownloading) {
+			alert("正在下载离线资源,请等待完成或先暂停再操作。");
+			return;
+		}
 		if (_status) {
 			if (_status.reloading) {
 				return;
