@@ -71,10 +71,14 @@ async function fsKeys() {
 export default async function browserReady({ lib, game }) {
 	lib.path = (await import("path-browserify-esm")).default;
 
-	// 探测文件服务器是否可用:成功 → dev 环境(走 HTTP 接口);失败 → 纯静态部署(走 URL + IndexedDB)
+	// 探测文件服务器是否可用:成功 → dev 环境(走 HTTP 接口);失败 → 纯静态部署(走 URL + IndexedDB)。
+	// 加 2 秒超时:断网/纯静态部署时,若 SW 未及时接管该请求,避免 fetch 干等网络超时(几十秒)导致启动白屏。
 	let hasFileServer = false;
 	try {
-		const result = await fetch(`/checkFile?fileName=noname.js`).then(response => response.json());
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), 2000);
+		const result = await fetch(`/checkFile?fileName=noname.js`, { signal: controller.signal }).then(response => response.json());
+		clearTimeout(timer);
 		hasFileServer = !!result?.success;
 	} catch (e) {
 		hasFileServer = false;

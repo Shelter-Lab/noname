@@ -72,11 +72,24 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
 	const req = event.request;
 
-	// 只处理同源 GET
-	if (req.method !== "GET") return;
 	const url = new URL(req.url);
 	if (url.origin !== self.location.origin) return;
-	if (BYPASS.some(p => url.pathname.endsWith(p))) return;
+
+	// 文件服务器接口:纯静态部署下不存在。SW 立即返回失败,避免离线时
+	// browser.js 的 fetch('/checkFile'...) 干等网络超时导致启动白屏几十秒。
+	// (返回 {success:false} 让 browser.js 秒判定为纯静态模式)
+	if (BYPASS.some(p => url.pathname.endsWith(p) || url.pathname === p)) {
+		event.respondWith(
+			new Response('{"success":false,"code":404,"errorMsg":"static"}', {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			})
+		);
+		return;
+	}
+
+	// 其余只处理同源 GET
+	if (req.method !== "GET") return;
 
 	event.respondWith(
 		(async () => {
