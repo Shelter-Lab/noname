@@ -124,6 +124,7 @@ const characters = {
 		hp: 3,
 		skills: ["dcxidi", "dcchengyan"],
 		names: "诸葛|果",
+		clans: ["琅琊诸葛氏"],
 	},
 	yue_zoushi: {
 		sex: "female",
@@ -159,7 +160,7 @@ const characters = {
 	gongsunxiu: {
 		sex: "male",
 		group: "qun",
-		hp: 4,
+		hp: 5,
 		skills: ["dcgangu", "dckuizhen"],
 		names: "公孙|修",
 	},

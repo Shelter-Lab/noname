@@ -1,4 +1,11 @@
 const characters = {
+	dc_sb_zhonghui: {
+		sex: "male",
+		group: "wei",
+		hp: 4,
+		skills: ["dcsbjinglian", "dcsbxieshu", "dcsbzongzi"],
+		clans: ["颍川钟氏"],
+	},
 	lizhaoyi: {
 		sex: "female",
 		group: "shu",
@@ -56,6 +63,7 @@ const characters = {
 		hp: 3,
 		skills: ["dcsbjingmou", "dcsbguyi"],
 		names: "诸葛|亮",
+		clans: ["琅琊诸葛氏"],
 		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_sb_zhugeliang 的图)
 		img: "image/character/zhugeliang.jpg",
 	},
@@ -634,6 +642,7 @@ const characters = {
 		hp: 4,
 		skills: ["dcyanzuo", "dczuyin", "dcpijian"],
 		names: "诸葛|京",
+		clans: ["琅琊诸葛氏"],
 	},
 	liutan: {
 		sex: "female",
@@ -717,6 +726,7 @@ const characters = {
 		hp: 3,
 		skills: ["dcsbtaozhou", "dcsbhoude"],
 		names: "诸葛|瑾",
+		clans: ["琅琊诸葛氏"],
 	},
 	dc_sb_jiaxu: {
 		sex: "male",
@@ -793,7 +803,8 @@ const characters = {
 		group: "wei",
 		hp: 3,
 		skills: ["dcjichun", "dchanying"],
-		names: "诸葛|梦雪",
+		names: "诸葛|null",
+		clans: ["琅琊诸葛氏"],
 	},
 	bailingyun: {
 		sex: "female",
@@ -837,7 +848,8 @@ const characters = {
 		group: "wei",
 		hp: 3,
 		skills: ["dcqiongying", "dcnuanhui"],
-		names: "诸葛|若雪",
+		names: "诸葛|null",
+		clans: ["琅琊诸葛氏"],
 	},
 	caoyi: {
 		sex: "female",
@@ -1005,6 +1017,7 @@ const characters = {
 		maxHp: 7,
 		skills: ["dcjincui", "dcqingshi", "dczhizhe"],
 		names: "诸葛|亮",
+		clans: ["琅琊诸葛氏"],
 	},
 	duanqiaoxiao: {
 		sex: "female",
