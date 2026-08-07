@@ -91,6 +91,15 @@
 				} catch (e) { /* ignore */ }
 				navigator.serviceWorker.register("./pwa-sw.js").catch(err => console.warn("PWA SW 注册失败:", err));
 			});
+			// 首次装 SW 时本次文档尚未受控(iOS standalone 冷启动 SW 接管有竞态);
+			// SW 接管(controllerchange)后 reload 一次,让此后冷启动即受控 → 请求都走 SW(有超时兜底),
+			// 避免"请求绕过未接管的 SW → 断网永久 pending → 白屏"。sessionStorage 去重防死循环。
+			navigator.serviceWorker.addEventListener("controllerchange", () => {
+				if (!sessionStorage.getItem("pwa-controlled-reload")) {
+					sessionStorage.setItem("pwa-controlled-reload", "1");
+					location.reload();
+				}
+			});
 		}
 	</script>
 	<script>

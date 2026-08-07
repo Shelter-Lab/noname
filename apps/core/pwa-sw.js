@@ -225,6 +225,14 @@ self.addEventListener("fetch", event => {
 				}
 				return await sanitizeResponse(resp);
 			} catch {
+				// script/style/module 未命中失败时,绝不能返回带文本 body 的响应——
+				// 浏览器会把 "离线且资源未缓存" 这段文本当 JS/CSS 模块解析,导致
+				// "importing binding 'c' is not found" 之类的 link 错误。
+				// 返回 Response.error()(网络错误)让它成为干净的"加载失败",触发正常错误处理。
+				const d = req.destination;
+				if (d === "script" || d === "style" || d === "document" || d === "font") {
+					return Response.error();
+				}
 				return new Response("离线且资源未缓存", { status: 504, statusText: "Offline" });
 			}
 		})()

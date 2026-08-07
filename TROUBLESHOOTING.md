@@ -36,23 +36,39 @@
 | SW 未命中缓存的资源断网 fetch 永久 pending | 未命中用无超时 fetch;iOS 断网 fetch 不 reject | miss 分支超时分档(见下),但注意:绕过 SW 的请求(如沙盒 iframe)此法无效,那类要从源头跳过 |
 | jit-test.ts / service-worker.js 断网加载失败 | 这些 dist 根级散文件漏在预缓存清单外(清单只扫子目录) | build.ts 补扫 dist 根一层的 .js/.ts 进核心清单 |
 
-### 断网白屏根治方案(超时两难的正解)
+### 断网白屏根治方案(超时两难的正解)—— 血泪史,反复横跳过,务必读完
 
-**历史横跳教训(别重蹈)**:
+**白屏本质**:boot() 一开始 arm 一个 30 秒看门狗(init/index.ts:30),启动某个网络 `await` 永久 pending → 30 秒没加载完 → `lib.init.reset` 弹"游戏似乎未正常载入,是否重置"→ 白屏。**能否离线启动,唯一取决于"启动文件在不在缓存"**;超时只决定"卡 30 秒白" vs "快速失败"。
+
+**为什么只有 iOS Safari/WebKit 中招、Chromium(Edge)不中招**:
+- **WebKit 断网时 `fetch()` 不 reject,而是永久 pending**(Chromium 秒 reject)。所以"无超时的 miss fetch"只坑 WebKit。**测离线必须用 Safari,Edge 测不出这个 bug**。
+
+**历史横跳教训(每条都真出过事,别重蹈)**:
 - ❌ 导航请求用 Network-First → Safari 断网 fetch 挂死。**导航必须 Cache-First(SWR),绝不改回**。
-- ❌ 给所有 fetch 加统一 2s 超时 → 断网启动不卡了,但「下载离线资源」批量拉未命中文件也被 2s 误杀 → 进度倒退。
-- ❌ 用 `postMessage`/模块级变量标记"正在下载" → iOS 事件间隙会杀空闲 SW,重启后 flag 丢失,又开始误杀。**只用请求级无状态信号**。
+- ❌ 给所有 fetch 加统一 2s 超时 → 启动不卡了,但「下载离线资源」批量拉未命中文件被 2s 误杀 → 进度倒退。
+- ❌ 用 `postMessage`/模块级变量标记"正在下载" → iOS 事件间隙杀空闲 SW,重启后 flag 丢失,又误杀。**只用请求级无状态信号**。
+- ❌❌ **miss 超时靠 `navigator.onLine === false` 门控**(曾以为"确定离线才快失败")→ **iOS 主屏 PWA 飞行模式下 onLine 常仍报 true** → 门控失效 → 走无超时 fetch → 永久 pending → **standalone 白屏(浏览器却正常,因浏览器 onLine 可靠为 false)**。这是 standalone-only 白屏的头号真凶,查了极久。**miss 超时绝不能依赖 navigator.onLine**。
 
-**正解(pwa-sw.js `missTimeoutMs`,两个正交无状态信号分档)**:
+**正解(pwa-sw.js `missTimeoutMs`)**:miss 一律给有限超时,**不看 onLine**:
 - **下载器 + 清单**(唯一带 `req.cache === "no-cache"` 进 handler)→ **绝不超时**(避开误杀下载)
-- **启动关键资源**(`req.destination` = script/style/document/font)→ `navigator.onLine===false` 确定离线时 **4s 快失败**(不再永久 pending 卡到 30s),在线 15s 容慢网
-- **图片/音频/视频**(运行期大素材)→ 不超时
+- **启动关键资源**(destination = script/style/document/font)→ **4s** 快失败
+- **其余**(XHR/.ts JIT源/import 子资源 destination=""/图片/音频)→ **8s** 快失败
+- **script/style/font 的 miss 失败要返回 `Response.error()`,不能返回带文本 body 的 504**——否则浏览器把"离线且资源未缓存"当模块解析,报 `importing binding 'c' is not found`(crypto-js 的 _virtual/index4.js 导出名就叫 c)
 
-**为什么用这俩信号**:下载器 destination 是空串(不是 image/audio),但它带 `cache:"no-cache"`;启动 script 是 default cache 模式。两个信号完全正交,能无歧义区分「该快失败的启动脚本」和「绝不能超时的下载」,且无状态(扛得住 iOS 杀 SW 重启)。
+**为什么 no-cache 信号可靠**:下载器 destination 是空串(不是 image/audio),但带 `cache:"no-cache"`;启动请求是 default cache 模式。两个信号正交、无状态(扛得住 iOS 杀 SW 重启)。
 
-**第2层根治(预缓存完整性)**:install 的 allSettled 会「首访网抖漏文件却标记成功」→ 离线白屏。修法:失败退避重试 3 轮 + `cache.match` 对账 709 项 + 存完成标记(`/__precache_status__`);页面 `QUERY_PRECACHE` 查询,没下齐则 console 警告"联网重开补齐"。
+**standalone vs 浏览器的差异(为什么 standalone 更容易白屏)**:
+1. **独立存储分区**:主屏 PWA 和 Safari 浏览器的 Cache/SW 不共享 → "相同操作"不等于"缓存了相同字节",两边 miss 的文件可能不同
+2. **navigator.onLine 在 standalone 飞行模式不可靠**(见上)
+3. **SW 冷启接管竞态**:SW 注册在 window load(晚),standalone 冷启动那一刻 SW 可能没接管 → 请求绕过 SW 直连网络 → 超时兜底不在链路上。缓解:index.html 加 `controllerchange` 后 reload 一次(首次接管后下次冷启即受控)
+4. **Cache Storage 驱逐更激进**:standalone 分区配额压力大,可能驱逐掉某模块 → 非打包 eager ESM 图一处洞就整体 link 失败
+5. **无浏览器 UI 兜底**:同样卡顿,浏览器有地址栏/刷新/容错,standalone 直接白
 
-**残留风险(物理边界,绕不过)**:首访没下完就断网/关 PWA,预缓存不完整 → 下次离线仍白屏。只能靠完成标记提示,无法归零。
+**沙盒卡死(已修,别再纠结)**:iOS 主屏 PWA UA 缺"Safari"→ is.safari()=false → 曾启用沙盒 → about:blank iframe 加载 sandbox.js,该 iframe 子请求绕过 SW → 断网永久 pending。已用 `init/index.ts:53 && lib.device !== "ios"` 跳过(lib.device 靠 UA 含 iphone/ipad 判断,可靠;时序 entry.ts:10 赋值早于 boot)。沙盒本 fork 编译期已禁用(SANDBOX_ENABLED=false),跳过零副作用。**这是第一个坑,onLine 是第二个坑,坑坑洼洼逐个填**。
+
+**关于 504 报错(良性,别慌)**:断网启动时控制台一堆 `504 (Offline)` 是**正常且良性的**——核心代码命中缓存(能进游戏),没缓存的大素材(没点"下载离线资源"的立绘/语音/花体字)miss → SW 返回 504 → 游戏 allSettled 跳过它们照常启动。504 = 超时兜底在正常工作(快速告诉游戏"这个没有,别等")。要消除就把"下载离线资源"下全,但不下全也能玩(核心够)。
+
+**残留风险(物理边界,绕不过)**:首访没下完就断网/关 PWA,预缓存不完整 → 下次离线可能缺文件。miss 超时能防"白屏卡死"(变成缺图而非卡死),但缺的文件本身补不回来,除非联网重开。
 
 ### 明确不要动
 - 导航分支保持 Cache-First(SWR)+ 多 key 兜底
