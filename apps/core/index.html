@@ -91,15 +91,11 @@
 				} catch (e) { /* ignore */ }
 				navigator.serviceWorker.register("./pwa-sw.js").catch(err => console.warn("PWA SW 注册失败:", err));
 			});
-			// 首次装 SW 时本次文档尚未受控(iOS standalone 冷启动 SW 接管有竞态);
-			// SW 接管(controllerchange)后 reload 一次,让此后冷启动即受控 → 请求都走 SW(有超时兜底),
-			// 避免"请求绕过未接管的 SW → 断网永久 pending → 白屏"。sessionStorage 去重防死循环。
-			navigator.serviceWorker.addEventListener("controllerchange", () => {
-				if (!sessionStorage.getItem("pwa-controlled-reload")) {
-					sessionStorage.setItem("pwa-controlled-reload", "1");
-					location.reload();
-				}
-			});
+			// 【不要再加 controllerchange → location.reload()】曾加过(57e310a),纯亏本已回退:
+			//  - 它想解决"首次打开时页面未受控、请求绕过 SW",但离线那次打开时 SW 早已 active,
+			//    页面天然受控 —— 对离线白屏毫无用处(TROUBLESHOOTING 早记过这条教训)。
+			//  - 代价是每次新版 SW 接管就整页重载一次 → 部署后首次打开耗时翻倍(实测明显变慢)。
+			//  - 且 sessionStorage 若退化成内存实现(见本文件顶部兜底),getItem 恒为 null → 无限 reload。
 		}
 	</script>
 	<script>

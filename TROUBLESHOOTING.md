@@ -26,14 +26,20 @@
 2. **iOS Safari/WebKit 断网时 `fetch()` 不 reject,而是长时间 pending 甚至永不返回**(Chromium 是秒失败)。这是最坑的行为差异——任何 `await fetch()` 断网都可能永久挂起。
 3. **能否离线启动,唯一取决于「启动文件在不在缓存」**。超时只决定「卡30秒白屏」还是「快速失败」,不决定能不能启动。
 4. **启动是 242 个 `<script type=module>` 静态标签**(dist/index.html),几乎在 t≈0 全部并行发起。boot 里有个 30 秒看门狗(init/index.ts),超时没加载完就弹「游戏似乎未正常载入,是否重置」。
+   (`grep -c` 会数出 243:多的那个是 dist/index.html:12 的**内联** JIT 引导块,首行 `if (!LOCAL_HOSTS.includes(location.hostname)) return;`,线上恒为 no-op、不发请求。)
+5. **【最关键的判据】能不能怪"缺文件"?看看门狗响没响**。看门狗在 boot 内部(`init/index.ts:30`)才 arm,所以**它一响就说明整个模块图 link 成功了**。而 miss 是**毫秒级快失败**(4s 上限 + `Response.error()`),解释不了"要等到 30s"。
+   → 于是"卡 30 秒/1 分钟"必然是 **boot 内部某个 `await` 挂住了**,而不是资源缺失。查白屏先按这个岔路分流,能省掉大半弯路。
+6. **`<script src="vue">` 这三个标签本来就 404,在线也一样**(dist/index.html:440/462/463)。`src` 按 URL 解析、**不走 importmap**(importmap 只作用于模块内的 import specifier),故解析成 `/vue` → 线上实测 404。游戏照常跑 = 它们是无害的死标签,**别把它们当白屏线索**。
 
 | 现象 | 根因 | 修法 |
 |---|---|---|
+| **standalone 断网启动要等 1 分多钟(比 Safari 慢 3 倍以上),先弹 iOS「蜂窝移动数据已关闭」再弹「是否重置游戏」,多等一会儿其实能进(真凶,2026-08-07)** | **`browser.js` 探测文件用的是 `HEAD` 请求,而 `pwa-sw.js:190 if (req.method !== "GET") return;` 让它【完全绕过 SW】→ SW 的超时兜底不在链路上 → 只能等 iOS 网络栈自己的默认超时(NSURLSession ≈ 60s)→ boot 的 `await` 空转一分钟。且 `noname.config.txt` 【线上就不存在】(404,两个清单里也没有),所以每次离线启动必中** | **`browser.js` 加 `fetchWithTimeout()`(2s AbortController),`game.checkFile` 的 HEAD 探测走它。绕过 SW 的请求必须【在源头自带超时】** |
 | `Response served by service worker has redirections` 白屏 | CF 把 `/index.html` 307 重定向到 `/`,SW 缓存了 redirected 响应;iOS 禁止 SW 返回 redirected 响应 | `sanitizeResponse()`:redirected 响应用响应体重建干净副本再缓存/返回。`start_url` 改 `/` 避免重定向 |
 | `localStorage null is not an object` 崩溃 | iOS PWA/隐私模式下 localStorage 可能为 null | index.html 最早期做内存兜底(usable 探测→内存实现) |
 | 冷启动"加载内容失败(undefined)" | 冷启动并发拉大量文件、SW 未接管,偶发失败 | 超时 30s + boot 失败自动 reload 重试一次(sessionStorage 防死循环) |
 | **断网启动白屏几十秒 / 弹"未正常载入"(真凶)** | **iOS 主屏 PWA 的 UA 缺"Safari"→ `get.is.safari()=false` → 启用沙盒 → `initializeSandboxRealms` 建 about:blank iframe 加载 sandbox.js;该 iframe 子请求在 iOS WebKit 上【不走父页 SW】→ 断网永久 pending → `await`(initRealms.js:118)永久挂 → 30秒看门狗弹框。SW 超时对它无效(请求没进 SW)** | **根治:`init/index.ts:53` 加 `&& lib.device !== "ios"` 让 iOS 也跳过沙盒(和 Safari 浏览器一致,已验证能进)。沙盒仅隔离联机远程代码、单机不依赖,且本 fork 编译期已禁用沙盒(initRealms.js SANDBOX_ENABLED=false),跳过零副作用 |
 | SW 未命中缓存的资源断网 fetch 永久 pending | 未命中用无超时 fetch;iOS 断网 fetch 不 reject | miss 分支超时分档(见下),但注意:绕过 SW 的请求(如沙盒 iframe)此法无效,那类要从源头跳过 |
+| 断网启动慢到"分钟级"(不只是某一个请求挂死) | SW 是单线程事件循环,几百个注定失败的 miss 各等满 4~8s 会排成长队,累加轻松几十秒 → 撞 30s 看门狗 | `pwa-sw.js` 加**纯内存离线启发式**:连续 3 个网络请求全失败 → 判"疑似离线" → 之后 miss 直接快失败、hit 分支也不发后台 revalidate;任何一次成功立即复位。下载器(`no-cache`)永不短路 |
 | jit-test.ts / service-worker.js 断网加载失败 | 这些 dist 根级散文件漏在预缓存清单外(清单只扫子目录) | build.ts 补扫 dist 根一层的 .js/.ts 进核心清单 |
 
 ### 断网白屏根治方案(超时两难的正解)—— 血泪史,反复横跳过,务必读完
@@ -60,9 +66,35 @@
 **standalone vs 浏览器的差异(为什么 standalone 更容易白屏)**:
 1. **独立存储分区**:主屏 PWA 和 Safari 浏览器的 Cache/SW 不共享 → "相同操作"不等于"缓存了相同字节",两边 miss 的文件可能不同
 2. **navigator.onLine 在 standalone 飞行模式不可靠**(见上)
-3. **SW 冷启接管竞态**:SW 注册在 window load(晚),standalone 冷启动那一刻 SW 可能没接管 → 请求绕过 SW 直连网络 → 超时兜底不在链路上。缓解:index.html 加 `controllerchange` 后 reload 一次(首次接管后下次冷启即受控)
-4. **Cache Storage 驱逐更激进**:standalone 分区配额压力大,可能驱逐掉某模块 → 非打包 eager ESM 图一处洞就整体 link 失败
-5. **无浏览器 UI 兜底**:同样卡顿,浏览器有地址栏/刷新/容错,standalone 直接白
+3. **无浏览器 UI 兜底**:同样卡顿,浏览器有地址栏/刷新/容错,standalone 直接白
+4. ~~SW 冷启接管竞态~~ / ~~Cache Storage 驱逐更激进~~ —— **这两条已证伪,见下面「已证伪的假设」**
+
+### 已证伪的假设(2026-08-07 系统排查,别再走回头路)
+
+查这个 bug 时提了一堆假设,下面这些**都被实证否掉了**,写下来省得下次重新猜一遍:
+
+| 假设 | 为什么不成立 |
+|---|---|
+| **ESM 模块图 link 失败 → 白屏** | 弹了「是否重置游戏」就证明它不成立:看门狗在 `init/index.ts:30`(boot 内部)才 arm,boot 跑到了 = `entry.js` 求值成功 = 整图 link 成功。另外脚本实测:242 个外部 module 标签的传递闭包 = 239 个模块,**全在核心清单里,0 缺失**;709 项磁盘 0 缺失 |
+| **`window.onerror` 的 `alert` 风暴锁死主线程** | ①`index.html` 那个 handler 在 boot 第 41 行被 `error.ts:108 setOnError` **整体覆盖**;②HTML 规范:模块 fetch 失败只 `fire an event named error at el`,**不冒泡到 window**,全仓库也没有 capture-phase 的 window error 监听 → 243 个失败产生 **0 个 alert** |
+| **sourcemap 放大器**(每帧 XHR 拉 `.map` 各等 8s) | `build.ts:132/174` 两处都是 `sourcemap: false`,`find dist -name "*.map"` = 0,产物无尾部 `sourceMappingURL` 注释 → `stacktrace-gps` 连 `.map` 的 URL 都构造不出来,一次都不 fetch。且 `error.ts:87` 是 `Promise.all`(并行),不是串行累加 |
+| **IndexedDB 缺 `onblocked` → 永久挂死** | `onblocked` 不会自解,一挂就是永远;但实测"多等一会儿能进" → 不是它。(仍是个值得补的小硬化项,只是不是本次真凶) |
+| **standalone 配额压力大 → 驱逐掉某模块** | [webkit.org/blog/14403](https://webkit.org/blog/14403/) 原文:origin quota = **总磁盘 15%**,且主屏 PWA "has the same origin quota and overall quota as when it is opened in a browser app"。实测全站 `core∪all` = 14993 项 / **1.2GB**,128G 机 15% ≈ 19.2G → **配额根本不是瓶颈**。且驱逐是 **per-origin LRU、整个 origin 一起删**,不存在"只掉某个模块"。原 :64 那条两个子命题全错,还和 :82「主屏 PWA 缓存稳定不会被乱清」自相矛盾,已删 |
+| **SW 冷启接管竞态 → 加 `controllerchange` reload** | 离线那次打开时 SW 早已 active、页面天然受控,对离线白屏**毫无用处**;代价是每次新版 SW 接管就整页重载 → 部署后首次打开耗时翻倍(实测明显变慢)。**已回退(`57e310a` 加的,纯亏本)**,`index.html` 里留了"别再加"的注释 |
+| **WebKit 已知 bug 就是本次病因** | 引文都真(见下),但四个都是 **RESOLVED FIXED**(iOS 12.1 / 14.6 / 16.5 / 17.2),2026 年的机子上没一个是活 bug。而且 225083 是**导航层**失败(整页打不开、脚本一行没跑),与"boot 跑了、看门狗响了"直接矛盾 —— 是类别论证,不能当根因 |
+
+### 业界参照(证明这条路历来脆弱,但别拿来当根因)
+
+社区不是没经验,是这条路**每代 iOS 都回归一次**,所以经验很快过时(我们现在是 OS 26,下面全是已修的历史):
+
+- [WebKit 225083](https://bugs.webkit.org/show_bug.cgi?id=225083) REGRESSION (iOS 14.5):带 SW 的主屏 PWA **间歇性离线打不开**,症状"首次常成功、反复关开后开始失败"。FIXED(r276845)
+- [WebKit 190269](https://bugs.webkit.org/show_bug.cgi?id=190269) iOS 12:**主屏 PWA 拿不到 SW 缓存**(NetworkProcessProxy 匹配不到 WebsiteDataStore → 返回 ephemeral 参数),当年打爆了 Workbox(workbox#1672)。FIXED
+- [WebKit 261767](https://bugs.webkit.org/show_bug.cgi?id=261767) REGRESSION (iOS 17):`caches.match()` 直接 reject 成 `TypeError: Internal error`。官方 workaround = **先 `caches.open()` 再 match**(我们本来就是这么写的,已天然规避)。Safari 17.2 修
+- [WebKit 256219](https://bugs.webkit.org/show_bug.cgi?id=256219) iOS 16.4:开 Screen Time / MDM 内容过滤就白屏,16.5 修
+- [Apple Forums 737827](https://developer.apple.com/forums/thread/737827)(13k 浏览、**0 条官方回复**):"必须先在 Safari 里打开一次才能恢复"
+- [angular/angular#50378](https://github.com/angular/angular/issues/50378):一整年的社区诊断,共识 = **所有 Cache API 调用都要包 try/catch**(Angular 侧防御不足 + Safari 缓存本身有 bug)
+
+**结论(回答"是不是只能一步一个坑")**:通用坑社区确实有共识(Cache API 包 try/catch、导航 Cache-First、别信 `navigator.onLine`),这些我们都做了;但**"哪个 await 挂住了"是本项目特有的**(HEAD 探测一个线上不存在的文件),没人能替我们查 —— 这类只能靠"列出所有绕过 SW 的请求"逐个排,而不是继续读社区帖子。
 
 **沙盒卡死(已修,别再纠结)**:iOS 主屏 PWA UA 缺"Safari"→ is.safari()=false → 曾启用沙盒 → about:blank iframe 加载 sandbox.js,该 iframe 子请求绕过 SW → 断网永久 pending。已用 `init/index.ts:53 && lib.device !== "ios"` 跳过(lib.device 靠 UA 含 iphone/ipad 判断,可靠;时序 entry.ts:10 赋值早于 boot)。沙盒本 fork 编译期已禁用(SANDBOX_ENABLED=false),跳过零副作用。**这是第一个坑,onLine 是第二个坑,坑坑洼洼逐个填**。
 
@@ -73,10 +105,12 @@
 ### 明确不要动
 - 导航分支保持 Cache-First(SWR)+ 多 key 兜底
 - 不给所有 fetch 加统一超时;超时只在 miss 分支且 no-cache 豁免
-- 不用消息/模块变量标记状态
-- 不做"SW 提前注册 + clients.claim"(对离线白屏无用,离线那次页面天然已被 active SW 接管)
+- 不用**必须跨 SW 重启存活**的状态标记(iOS 会杀空闲 SW,flag 丢了就误杀下载)。
+  注:`failStreak` 离线启发式**不违反这条** —— 它是"随时可重新探测的缓存",SW 被杀重启后归零,最多多花几个请求重学一遍,正确性不受影响
+- 不做"SW 提前注册 + clients.claim"、**不加 `controllerchange → location.reload()`**(对离线白屏无用,离线那次页面天然已被 active SW 接管;还会让部署后首次打开耗时翻倍。已踩过,见「已证伪的假设」)
 - hit 分支 SWR、BYPASS、pwa-version.json 的 Network-First 都别动
 - **缓存桶名恒为 `noname-pwa-v2`,activate 只删非当前桶**;改文件名/桶名会让"换版部署离线可用"风险剧增
+- **新增任何"绕过 SW"的请求(非 GET / 跨域 / iframe 子请求)必须自带 `AbortController` 超时** —— SW 的超时兜底对它们无效。这是本项目重复踩了两次的同一类坑(沙盒 iframe、HEAD 探测)
 
 ### 其它 iOS 认知(实测纠正过的)
 - **独立主屏 PWA 缓存稳定,不会被 iOS 乱清**(早先"7天清理/内存驱逐"说法对主屏 PWA 不成立)
@@ -122,9 +156,10 @@
 
 | 文件 | 我们的改动 | 检查点 |
 |---|---|---|
-| `apps/core/noname/init/browser.js` | 文件接口退回 URL + IndexedDB(纯静态模式) | 探测文件服务器 + 读写走 fetch/IndexedDB 还在吗 |
+| `apps/core/noname/init/browser.js` | ①文件接口退回 URL + IndexedDB(纯静态模式) ②`fetchWithTimeout` + `checkFile` 的 HEAD 探测带 2s 超时(治 standalone 离线卡 60s) | 探测文件服务器 + 读写走 fetch/IndexedDB 还在吗;**HEAD 还带着超时吗** |
 | `apps/core/noname/init/index.ts` | ①启动超时 30s ②`sandboxEnabled` 加 `&& lib.device !== "ios"`(跳沙盒治白屏) | 这两处还在吗 |
 | `apps/core/index.html` | ①localStorage 内存兜底 ②PWA meta/SW 注册 ③onerror 忽略 NotAllowedError ④QUERY_PRECACHE | 这几段内联脚本还在吗 |
+| `apps/core/pwa-sw.js` | (新增文件)缓存策略 + `missTimeoutMs` 超时分档 + `failStreak` 离线启发式 | 上游不会动,但改它前必读本文档「断网白屏根治方案」 |
 | `apps/core/noname/game/index.js` | ①createServer/connect 的 PeerJS 分流 ②createServer 开头 `if(!lib.node)lib.node={}` | 联机 P2P 分流还在吗 |
 | `apps/core/noname/library/element/content.ts` | waitForPlayer 改 `await game.createServer()` | 还在吗 |
 | `apps/core/mode/connect.js` | 「创建房间」按钮 + 不弹邀请链接 confirm | 还在吗 |

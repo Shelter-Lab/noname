@@ -30,6 +30,16 @@ function fsDB() {
 // 统一去掉前导斜杠,保证 IndexedDB key 一致(文件服务器传入的路径本就不带前导斜杠)
 const fsNorm = p => String(p).replace(/^\/+/, "");
 
+// 带超时的 fetch。【关键】纯静态模式下探测文件用的 HEAD 请求**不会进 Service Worker**
+// (pwa-sw.js 只接管 GET:`if (req.method !== "GET") return;`),因此 SW 的超时兜底对它无效,
+// 断网时只能等 iOS 网络栈自己的默认超时(约 60s)→ boot 的 await 空转一分钟 → 30s 看门狗先弹
+// "游戏似乎未正常载入,是否重置"→ 白屏。故这类绕过 SW 的请求必须在源头自带超时。
+function fetchWithTimeout(input, init, ms = 2000) {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), ms);
+	return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 async function fsGet(path) {
 	const db = await fsDB();
 	return new Promise((resolve, reject) => {
@@ -123,11 +133,12 @@ export default async function browserReady({ lib, game }) {
 	 */
 	game.checkFile = function checkFile(fileName, callback, onerror) {
 		if (!hasFileServer) {
-			// 纯静态:先查 IndexedDB(用户写入的),再用 HEAD 请求探测游戏自带文件
+			// 纯静态:先查 IndexedDB(用户写入的),再用 HEAD 请求探测游戏自带文件。
+			// HEAD 绕过 SW,必须自带超时(见 fetchWithTimeout 注释),否则断网时空转 60s 卡死 boot。
 			(async () => {
 				if ((await fsGet(fileName)) !== undefined) return 1;
 				try {
-					const resp = await fetch(fileName, { method: "HEAD" });
+					const resp = await fetchWithTimeout(fileName, { method: "HEAD" });
 					return resp.ok ? 1 : -1;
 				} catch (e) {
 					return -1;

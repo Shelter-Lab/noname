@@ -27,6 +27,23 @@ function fetchSafe(input, init, ms = 2000) {
 		.catch(e => { clearTimeout(timer); throw e; });
 }
 
+// —— 离线启发式(纯内存、无持久状态)——
+// 断网时最贵的开销不是"某个请求挂死",而是"几百个注定失败的请求各等满超时",SW 是单线程事件
+// 循环,排起来轻松几十秒 → 撞 boot 的 30s 看门狗。
+// 故:连续 OFFLINE_STREAK 个网络请求全失败 → 判定"疑似离线",此后 miss 直接快失败、hit 分支
+// 也不再发后台 revalidate;任何一次成功立即复位。
+// 【为什么这不违反"不用状态标记"的历史教训】那条针对的是"正在下载"这类**必须跨 SW 重启存活**
+// 的状态(iOS 杀 SW 后 flag 丢失 → 误杀下载)。这里是**可随时重新探测的缓存**:SW 被杀重启后
+// streak 归零,最多是多花几个请求重新学一遍,正确性不受影响。也不依赖 navigator.onLine
+// (standalone 飞行模式下它仍报 true,已证不可靠)。
+let failStreak = 0;
+const OFFLINE_STREAK = 3;
+const looksOffline = () => failStreak >= OFFLINE_STREAK;
+function noteNetResult(ok) {
+	if (ok) failStreak = 0;
+	else if (failStreak < OFFLINE_STREAK) failStreak++;
+}
+
 // 决定"未命中缓存的请求"该用多长超时(0=不超时)。
 // 【关键教训】不能靠 navigator.onLine 判离线:iOS 主屏 PWA 飞行模式下 onLine 常仍报 true,
 // 导致超时档失效→走无超时 fetch→WebKit 断网永久 pending→boot 的 await 挂死→30s 白屏(standalone 白屏真凶)。
@@ -201,15 +218,19 @@ self.addEventListener("fetch", event => {
 
 			if (cached) {
 				// 命中缓存:立即返回(离线可玩),后台静默更新。
-				// 后台用 fetchSafe(短超时):Safari 断网挂住也无所谓,不阻塞。
-				fetchSafe(req)
-					.then(async resp => {
-						if (resp && resp.status === 200) {
-							const clean = await sanitizeResponse(resp.clone());
-							cache.put(req, clean);
-						}
-					})
-					.catch(() => {});
+				// 疑似离线时跳过 revalidate:否则冷启动会并发几百个注定失败的 fetch,把 SW 的
+				// 单线程事件循环堵住,拖慢真正需要网络的请求(离线启动变慢的一大来源)。
+				if (!looksOffline()) {
+					fetchSafe(req)
+						.then(async resp => {
+							noteNetResult(true);
+							if (resp && resp.status === 200) {
+								const clean = await sanitizeResponse(resp.clone());
+								cache.put(req, clean);
+							}
+						})
+						.catch(() => noteNetResult(false));
+				}
 				return await sanitizeResponse(cached);
 			}
 
@@ -217,14 +238,23 @@ self.addEventListener("fetch", event => {
 			// 启动脚本断网未命中 → 快速失败(504)让启动继续,不再永久 pending 卡到 30s 弹"未正常载入"白屏;
 			// 下载器/大素材 → 不超时,慢也该等。
 			const ms = missTimeoutMs(req);
+			// 疑似离线且不是下载器(no-cache 豁免)→ 一个网络往返都不发,直接快失败。
+			// 这是离线启动从"分钟级"降到"秒级"的关键:省掉 N×4~8s 的排队等待。
+			if (looksOffline() && ms > 0) {
+				const d0 = req.destination;
+				if (d0 === "script" || d0 === "style" || d0 === "document" || d0 === "font") return Response.error();
+				return new Response("离线且资源未缓存", { status: 504, statusText: "Offline" });
+			}
 			try {
 				const resp = ms > 0 ? await fetchSafe(req, undefined, ms) : await fetch(req);
+				noteNetResult(true);
 				if (resp && resp.status === 200) {
 					const clean = await sanitizeResponse(resp.clone());
 					cache.put(req, clean);
 				}
 				return await sanitizeResponse(resp);
 			} catch {
+				noteNetResult(false);
 				// script/style/module 未命中失败时,绝不能返回带文本 body 的响应——
 				// 浏览器会把 "离线且资源未缓存" 这段文本当 JS/CSS 模块解析,导致
 				// "importing binding 'c' is not found" 之类的 link 错误。
