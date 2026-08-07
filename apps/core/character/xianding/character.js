@@ -5,6 +5,8 @@ const characters = {
 		hp: 4,
 		skills: ["dcsbjinglian", "dcsbxieshu", "dcsbzongzi"],
 		clans: ["颍川钟氏"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_sb_zhonghui 的图)
+		img: "image/character/zhonghui.jpg",
 	},
 	lizhaoyi: {
 		sex: "female",
