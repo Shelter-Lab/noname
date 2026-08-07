@@ -48,8 +48,9 @@ init/index.ts:43  await loadConfig()
 
 **已跑**:`pnpm build` 通过(709/14284,版本戳 2608071615),产物里三处改动都核实落地。
 
-**待真机验证**:iPhone 主屏 PWA 联网打开一次(建缓存 + 装新 SW)→ 断网 → 关闭重开。
-预期:**几秒内进游戏,两个框都不再出现**。(控制台 `504 (Offline)` 报错是良性的,见 TROUBLESHOOTING)
+**✅ 已真机验证通过(2026-08-07)**:iPhone 主屏 PWA 断网**几秒进游戏**,两个框都不再出现,
+核心 709 也很快下完。**standalone 离线白屏这条长期 bug 至此收口**。
+(控制台 `504 (Offline)` 报错是良性的,见 TROUBLESHOOTING)
 
 ---
 
@@ -104,8 +105,14 @@ Build `pnpm install --no-frozen-lockfile && pnpm build`;Deploy `npx wrangler dep
 2. 若还慢:Mac Safari 连 iPhone 看 Network,找**还在 pending 的那个请求** —— 按上面的判据,答案一定在 boot 内部的 await 里
 3. 可选硬化(不急,已知不是真凶):`browser.js` 的 `fsDB()` 和 `init/index.ts:802` 的
    `indexedDB.open()` 都缺 `onblocked` 分支(挂了不会自解)
-4. `downloadOfflineAssets`(`library/init/index.js`)**进度条会虚报**(读码确认):批处理里
-   `if (r.status === 200)` 才 `cache.put`,但**非 200 也正常 resolve** → `res.status === "fulfilled"`
-   → `done++`。所以"下载完成 14993/14993"不等于真的全缓存了,能解释历史上"下过了却还缺文件"。
-   修法:让非 200 抛错(或单独计失败数并在结尾提示)。**本轮故意没改** —— 想让真机验证只有一个变量
-   (白屏修复),别把下载行为也一起动
+4. `downloadOfflineAssets`(`library/init/index.js`)进度条**有虚报的代码缺陷,但当前未发作**:
+   `if (r.status === 200)` 才 `cache.put`,而非 200 也正常 resolve → `allSettled` 判 `fulfilled` → `done++`。
+   **实测清单里没有 404**(890 个非 ASCII 路径经 `fetch` 自动 URL 编码后都是 200),所以现在的
+   "14993/14993 下载完成"是**可信的**。属潜在隐患:哪天清单与产物脱节才会骗人。
+   修法:非 200 抛错或单独计失败数。不急
+
+### 别再自己骗自己:用 curl 探线上资源必须先 URL 编码
+
+清单里 890 个非 ASCII 路径(`dc_zhangyì.mp3`、`db_atk1_克敌先机.png`、`extension/杀海拾遗/*`)。
+`curl .../dc_zhangyì.mp3` → 404,`curl .../dc_zhangy%C3%AC.mp3` → 200。浏览器 `fetch()` 自动编码,
+**游戏里一切正常**。本 session 踩过:据此误判"890 个文件线上缺失、十几个武将没立绘",全是自造的假象。

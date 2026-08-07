@@ -128,6 +128,17 @@
 | 下载完再点"下载离线资源"→白屏 | 再点时逐个 `cache.match`(1.4万次)密集查询压垮 iOS 主线程 | 改用 `cache.keys()` 一次取全 + Set 批量比对 |
 | 下载完锁定后无法补下新增文件("下载完的缓存没法再加") | 完成后打 localStorage 锁定,清单更新(新增 jit-test.ts)也不让重下 | 去掉永久锁定,每次点击都批量核对→只补缺失(增量续传);合并 core+all 清单核对 |
 | 缓存桶名不一致 | 下载函数写 `noname-pwa-v1`,SW 读 `noname-pwa-v2` | 统一 `noname-pwa-v2` |
+| **进度条虚报"下载完成 N/N"(潜在隐患,尚未发作)** | `downloadOfflineAssets` 批处理里只有 `if (r.status === 200)` 才 `cache.put`,但**非 200 也正常 resolve** → `allSettled` 判 `fulfilled` → `done++`。即"计数涨了但缓存里没东西" | 实测当前清单**无 404**(890 个非 ASCII 路径经 `fetch` 自动编码后都是 200),故暂未发作。若哪天清单与产物脱节(上游删文件而清单未更新)就会悄悄骗人。修法:非 200 抛错,或单独计失败数并在结尾提示 |
+
+**清单口径别搞混**:`pwa-core-assets.json` = **709**(SW install 预缓存,启动+标准局必需);
+`pwa-all-assets.json` = **14284**(核心之外的大素材)。两者**交集 0**,合计 **14993** —— 
+下载器核对的是**合并清单**,所以界面显示的总数是 14993,不是 14284。core 排在合并数组前面,
+故按钮下载时**核心优先**(且它们通常已被 SW 预缓存过,直接算已完成)。
+
+**CF 文件数上限**:Workers Static Assets 限 **20000 个文件**(单文件 25MiB)。当前 dist = **15356**
+(audio 9380、image 4044、extension 854),余量约 4600。真撞墙时按此优先级处置:
+①不部署内置 `extension/`(854,大多不启用)②audio 挪 R2(占 61%,R2 无文件数限制)
+③打包分卷 archive 按需解包进 IndexedDB(工程量大)。**限制是文件数而非总容量**,所以"文件多"比"体积大"更容易撞墙。
 
 ---
 
@@ -147,6 +158,12 @@
 - 本地纯静态验证:`cd dist && python -m http.server`(无 /checkFile 接口,等效 CF)。跑完停掉服务器,否则锁 dist 导致 build.ts 的 `fs.rm("dist")` 报 EBUSY
 - iOS 主屏 PWA 调试:iPhone 设置→Safari→高级→网页检查器;Mac Safari 开发菜单→选 iPhone→主屏 PWA **单独列出**(独立 origin)。断网后看 Network 标签哪个请求一直 pending = 白屏元凶
 - macOS Safari 和 iOS Safari 同 WebKit,行为基本一致,可直接 Mac Safari 测离线(断 WiFi 刷新)
+- **用 curl 探线上资源时必须自己做 URL 编码** —— 清单里有 **890 个非 ASCII 路径**
+  (带声调拼音如 `dc_zhangyì.mp3`、中文卡名如 `db_atk1_克敌先机.png`、中文扩展目录如 `extension/杀海拾遗/`)。
+  `curl .../dc_zhangyì.mp3` → **404**,`curl .../dc_zhangy%C3%AC.mp3` → **200**,文件其实好好的。
+  浏览器 `fetch()` 会自动经 `new URL()` 把它编码成 `%C3%AC`,所以**游戏里一切正常**;
+  是 curl 不编码才假 404。踩过一次:据此误判"890 个文件线上缺失",实为自造的假象。
+  正确做法:探测前先 `new URL(raw, origin).href` 再喂给 curl
 
 ---
 
