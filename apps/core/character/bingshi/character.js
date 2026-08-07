@@ -24,12 +24,16 @@ const characters = {
 		hp: 4,
 		skills: ["potlibing", "potpoxi"],
 		names: "夏侯|霸",
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 pot_xiahouba 的图)
+		img: "image/character/xiahouba.jpg",
 	},
 	pot_chenqun: {
 		sex: "male",
 		group: "wei",
 		hp: 3,
 		skills: ["potfaen", "potdingpin"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 pot_chenqun 的图)
+		img: "image/character/chenqun.jpg",
 	},
 	pot_caozhen: {
 		sex: "male",
@@ -48,12 +52,16 @@ const characters = {
 		group: "wei",
 		hp: 4,
 		skills: ["potdianyi", "potshequan", "potjianzhuan"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 pot_caoshuang 的图)
+		img: "image/character/caoshuang.jpg",
 	},
 	pot_zhangren: {
 		sex: "male",
 		group: "qun",
 		hp: 4,
 		skills: ["potfuan", "potyinxian"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 pot_zhangren 的图)
+		img: "image/character/zhangren.jpg",
 	},
 	pot_sunchen: {
 		sex: "male",
@@ -81,6 +89,8 @@ const characters = {
 		group: "wei",
 		hp: 3,
 		skills: ["potqingyan", "potceduan"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 pot_chenjiao 的图)
+		img: "image/character/chenjiao.jpg",
 	},
 	pot_chendao: {
 		sex: "male",

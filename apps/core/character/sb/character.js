@@ -5,6 +5,8 @@ const characters = {
 		hp: 4,
 		skills: ["sbdengxian", "sbzhejian"],
 		clans: ["颍川陈氏"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 sb_chentai 的图)
+		img: "image/character/chentai.jpg",
 	},
 	sb_zhuran: {
 		sex: "male",

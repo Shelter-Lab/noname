@@ -4,6 +4,8 @@ const characters = {
 		group: "shu",
 		hp: 3,
 		skills: ["dcqiansu", "dcxingbang", "dcfanhuo"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_feiyi 的图)
+		img: "image/character/feiyi.jpg",
 	},
 	yue_caozhi: {
 		sex: "male",
@@ -17,6 +19,8 @@ const characters = {
 		hp: 5,
 		skills: ["dczhoufa", "dcshouqun"],
 		names: "null|null",
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_muludawang 的图)
+		img: "image/character/muludawang.jpg",
 	},
 	dc_zhangshiping: {
 		sex: "male",

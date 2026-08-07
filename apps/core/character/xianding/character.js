@@ -5,6 +5,8 @@ const characters = {
 		hp: 4,
 		skills: ["dcsbjinglian", "dcsbxieshu", "dcsbzongzi"],
 		clans: ["颍川钟氏"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_sb_zhonghui 的图)
+		img: "image/character/zhonghui.jpg",
 	},
 	lizhaoyi: {
 		sex: "female",
@@ -30,24 +32,32 @@ const characters = {
 		group: "qun",
 		hp: 3,
 		skills: ["dcsbzhubo", "dcsbxieshi", "dcsbqijue"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_sb_yangfeng 的图)
+		img: "image/character/yangfeng.jpg",
 	},
 	v_guanyinping: {
 		sex: "female",
 		group: "shu",
 		hp: 4,
 		skills: ["dcshaowei", "dcdichou"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 v_guanyinping 的图)
+		img: "image/character/guanyinping.jpg",
 	},
 	dc_sb_wangping: {
 		sex: "male",
 		group: "shu",
 		hp: 4,
 		skills: ["dcsbyouyi", "dcsbfangong"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_sb_wangping 的图)
+		img: "image/character/wangping.jpg",
 	},
 	dc_sb_masu: {
 		sex: "male",
 		group: "shu",
 		hp: 3,
 		skills: ["dcsbchengce", "dcsbxinzhan"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_sb_masu 的图)
+		img: "image/character/masu.jpg",
 	},
 	dc_sb_zhugeliang: {
 		sex: "male",
@@ -56,6 +66,8 @@ const characters = {
 		skills: ["dcsbjingmou", "dcsbguyi"],
 		names: "诸葛|亮",
 		clans: ["琅琊诸葛氏"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_sb_zhugeliang 的图)
+		img: "image/character/zhugeliang.jpg",
 	},
 	dc_shen_guanyu: {
 		sex: "male",
@@ -93,6 +105,8 @@ const characters = {
 		group: "qun",
 		hp: 4,
 		skills: ["wudou", "jiandao"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_xia_wangyue 的图)
+		img: "image/character/ns_wangyue.jpg",
 	},
 	shie: {
 		sex: "male",
@@ -208,6 +222,8 @@ const characters = {
 		group: "shu",
 		hp: 3,
 		skills: ["dcquanshi", "dcczchouxi"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_chenzhi 的图)
+		img: "image/character/mb_chenzhi.jpg",
 	},
 	dc_sb_liuzhang: {
 		sex: "male",
@@ -523,6 +539,8 @@ const characters = {
 		hp: 4,
 		skills: ["dcshenduan", "dckegou", "dcdixian"],
 		clans: ["吴郡陆氏"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 wu_lukang 的图)
+		img: "image/character/lukang.jpg",
 	},
 	sunba: {
 		sex: "male",

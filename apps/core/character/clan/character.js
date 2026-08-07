@@ -69,6 +69,8 @@ const characters = {
 		hp: 4,
 		skills: ["clangaojin", "clanmuyin"],
 		clans: ["陈留吴氏"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 clan_wuyi 的图)
+		img: "image/character/wuyi.jpg",
 	},
 	clan_wuxian: {
 		sex: "female",
@@ -126,6 +128,8 @@ const characters = {
 		skills: ["clanfuyao", "clanfenshi"],
 		names: "诸葛|果",
 		clans: ["琅琊诸葛氏"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 clan_zhugeguo 的图)
+		img: "image/character/zhugeguo.jpg",
 	},
 	clan_zhugezhan: {
 		sex: "male",
@@ -134,6 +138,8 @@ const characters = {
 		skills: ["clanchengwang", "clanzhugezhan"],
 		names: "诸葛|瞻",
 		clans: ["琅琊诸葛氏"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 clan_zhugezhan 的图)
+		img: "image/character/zhugezhan.jpg",
 	},
 	clan_hanshao: {
 		sex: "male",

@@ -24,6 +24,8 @@ const characters = {
 		group: "qun",
 		hp: 4,
 		skills: ["rejijun", "refangtong"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 xin_zhangliang 的图)
+		img: "image/character/zhangliang.jpg",
 	},
 	re_simalang: {
 		sex: "male",
@@ -31,6 +33,8 @@ const characters = {
 		hp: 3,
 		skills: ["requji", "rejunbing"],
 		names: "司马|朗",
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 re_simalang 的图)
+		img: "image/character/simalang.jpg",
 	},
 	re_zhugedan: {
 		sex: "male",

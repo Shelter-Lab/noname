@@ -61,6 +61,8 @@ const characters = {
 		hp: 3,
 		skills: ["olzhuoyue", "olqiaowu"],
 		names: "樊|玉凤",
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_fanyufeng 的图；樊氏即樊玉凤)
+		img: "image/character/fanyufeng.jpg",
 	},
 	ol_qiaogong: {
 		sex: "male",
@@ -86,6 +88,8 @@ const characters = {
 		group: "wei",
 		hp: 3,
 		skills: ["olkedi", "olcunze"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_caizhenji 的图)
+		img: "image/character/caizhenji.jpg",
 	},
 	ol_zhangmancheng: {
 		sex: "male",
@@ -386,6 +390,8 @@ const characters = {
 		group: "wei",
 		hp: 3,
 		skills: ["skill_zhangji_A", "skill_zhangji_B"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_tw_zhangji 的图)
+		img: "image/character/mb_tw_zhangji.jpg",
 	},
 	ol_feiyi: {
 		sex: "male",
