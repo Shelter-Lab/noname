@@ -108,7 +108,10 @@
 - 不用**必须跨 SW 重启存活**的状态标记(iOS 会杀空闲 SW,flag 丢了就误杀下载)。
   注:`failStreak` 离线启发式**不违反这条** —— 它是"随时可重新探测的缓存",SW 被杀重启后归零,最多多花几个请求重学一遍,正确性不受影响
 - 不做"SW 提前注册 + clients.claim"、**不加 `controllerchange → location.reload()`**(对离线白屏无用,离线那次页面天然已被 active SW 接管;还会让部署后首次打开耗时翻倍。已踩过,见「已证伪的假设」)
-- hit 分支 SWR、BYPASS、pwa-version.json 的 Network-First 都别动
+- hit 分支 SWR、BYPASS、`pwa-version.json` + 两个 `*-assets.json` 的 Network-First 都别动
+- **Network-First 只许用于"必须最新的小元数据"(版本号/资源清单),绝不可推广到导航或普通资源** ——
+  导航走 Network-First 就是 WebKit 断网白屏(见上「历史横跳教训」第一条)。清单能用是三个条件同时成立:
+  ①调用频率极低(只在点「下载离线资源」和 SW install 时)②体积小有 2s 超时兜底 ③有缓存 fallback
 - **缓存桶名恒为 `noname-pwa-v2`,activate 只删非当前桶**;改文件名/桶名会让"换版部署离线可用"风险剧增
 - **新增任何"绕过 SW"的请求(非 GET / 跨域 / iframe 子请求)必须自带 `AbortController` 超时** —— SW 的超时兜底对它们无效。这是本项目重复踩了两次的同一类坑(沙盒 iframe、HEAD 探测)
 
@@ -128,6 +131,7 @@
 | 下载完再点"下载离线资源"→白屏 | 再点时逐个 `cache.match`(1.4万次)密集查询压垮 iOS 主线程 | 改用 `cache.keys()` 一次取全 + Set 批量比对 |
 | 下载完锁定后无法补下新增文件("下载完的缓存没法再加") | 完成后打 localStorage 锁定,清单更新(新增 jit-test.ts)也不让重下 | 去掉永久锁定,每次点击都批量核对→只补缺失(增量续传);合并 core+all 清单核对 |
 | 缓存桶名不一致 | 下载函数写 `noname-pwa-v1`,SW 读 `noname-pwa-v2` | 统一 `noname-pwa-v2` |
+| **产物更新后"下载离线资源"仍显示旧总数(如清单已 14294 却仍报 14993)** | 两个清单 json 走**默认 SWR 分支** → 命中旧缓存秒返回,新清单只在后台更新、下次打开才生效。下载器虽写了 `cache:"no-cache"`,但那**只约束浏览器 HTTP 缓存,请求照样进 SW 被 Cache Storage 拦下** —— SW 里 `no-cache` 仅用于 `missTimeoutMs` 豁免超时,从不用来跳过缓存。**危害不只是数字难看:按旧清单下载会漏掉新增素材**(新补的立绘照样是剪影) | `pwa-sw.js` 把两个 `*-assets.json` 和 `pwa-version.json` 一起走 **Network-First**。清单 gzip 后仅 57KB / 实测 0.14s,`fetchSafe` 默认 2s 超时余量 14 倍,超时/离线 fallback 缓存。**另:离线兜底体必须按类型分流** —— 清单给 `[]`,`pwa-version.json` 给 `{}`;原先统一给 `{}` 会让下载器 `[...new Set([...coreList, ...allList])]` 抛 not iterable |
 | **进度条虚报"下载完成 N/N"(潜在隐患,尚未发作)** | `downloadOfflineAssets` 批处理里只有 `if (r.status === 200)` 才 `cache.put`,但**非 200 也正常 resolve** → `allSettled` 判 `fulfilled` → `done++`。即"计数涨了但缓存里没东西" | 实测当前清单**无 404**(890 个非 ASCII 路径经 `fetch` 自动编码后都是 200),故暂未发作。若哪天清单与产物脱节(上游删文件而清单未更新)就会悄悄骗人。修法:非 200 抛错,或单独计失败数并在结尾提示 |
 
 **清单口径别搞混**:`pwa-core-assets.json` = **709**(SW install 预缓存,启动+标准局必需);

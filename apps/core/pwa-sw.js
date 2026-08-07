@@ -189,9 +189,13 @@ self.addEventListener("fetch", event => {
 	// 其余只处理同源 GET
 	if (req.method !== "GET") return;
 
-	// pwa-version.json 用 Network-First:检查更新时必须拿到最新版本号,
-	// 离线时 fallback 到缓存(显示上次已知版本)。
-	if (url.pathname.endsWith("/pwa-version.json")) {
+	// pwa-version.json 和两个资源清单用 Network-First:必须拿到最新的,离线时 fallback 到缓存。
+	// 【为什么清单也必须 Network-First】曾漏了清单,导致产物更新后"下载离线资源"界面长期显示
+	// 旧总数(线上清单已 14294,界面仍报 14993),因为走默认 SWR 分支 → 命中旧缓存秒返回,新清单
+	// 只在后台更新、下次打开才生效。下载器虽写了 `cache:"no-cache"`,但那只约束浏览器 HTTP 缓存,
+	// 请求照样进 SW 被 Cache Storage 拦下 —— SW 里 no-cache 仅用于豁免超时(missTimeoutMs)。
+	// 后果不只是数字难看:按旧清单下载会漏掉新增素材(新补的立绘照样是剪影)。
+	if (url.pathname.endsWith("/pwa-version.json") || url.pathname.endsWith("/pwa-all-assets.json") || url.pathname.endsWith("/pwa-core-assets.json")) {
 		event.respondWith(
 			(async () => {
 				const cache = await caches.open(CACHE);
@@ -204,7 +208,12 @@ self.addEventListener("fetch", event => {
 					return await sanitizeResponse(resp);
 				} catch {
 					const cached = await cache.match(req);
-					return cached || new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+					if (cached) return cached;
+					// 离线且无缓存:兜底体必须与消费方期待的类型一致 ——
+					// 清单是数组(下载器 `[...new Set([...coreList, ...allList])]` 展开,给对象会抛 not iterable),
+					// pwa-version.json 是对象。
+					const empty = url.pathname.endsWith("assets.json") ? "[]" : "{}";
+					return new Response(empty, { status: 200, headers: { "Content-Type": "application/json" } });
 				}
 			})()
 		);
