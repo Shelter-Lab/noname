@@ -184,4 +184,5 @@
 | `apps/core/noname/ui/create/index.js` | 分享文本改房间号引导 | 还在吗 |
 | `apps/core/noname/ui/create/menu/pages/otherMenu.js` | 检查更新按钮 + 双主页链接 | 还在吗 |
 | `scripts/build.ts` | ①产物校验 ②生成 pwa-core/all-assets.json(含 dist 根散文件) | 清单生成还在吗 |
+| `apps/core/character/{bingshi,clan,huicui,mobile,newjiang,onlyOL,refresh,sb,sp,xianding}/character.js` | 给 35 个无立绘武将插 `img:` 字段(消除剪影),搜注释 `无自有立绘,复用同一人物的本体立绘` 可定位全部 | 跑 `node scripts/audit-character-images.cjs`,应报"零剪影"。**上游若补了真图,删掉我们的 `img:` 行**。详见 [docs/CHARACTER-IMAGES.md](./docs/CHARACTER-IMAGES.md) |
 | 新增文件(不会冲突) | `pwa-sw.js`、`manifest.webmanifest`、`peerAdapter.js`、`wrangler.jsonc`、`image/pwa/*`、本文档、README-PWA.md | 上游不会动,一般安全 |

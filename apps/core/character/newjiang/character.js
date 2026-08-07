@@ -50,6 +50,8 @@ const characters = {
 		group: "qun",
 		hp: 4,
 		skills: ["dcwangyao", "dczengua", "dckanghui"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 yao_yuanshu 的图)
+		img: "image/character/yuanshu.jpg",
 	},
 	yj_zhanghuan: {
 		sex: "male",

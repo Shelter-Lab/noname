@@ -42,6 +42,22 @@
 ### 5. 手动检查更新
 「其它 → 更新」界面加「检查更新」按钮（纯手动），PWA 下拉取最新版并刷新，缓存保留。
 
+### 6. 补齐缺失的武将立绘（消除剪影）
+上游有一批武将**没有自己的立绘文件**，游戏会回落成性别剪影
+（[polyfill.ts](apps/core/noname/init/polyfill.ts) 给 `backgroundImage` 塞两个 url，
+第二个是 `default_silhouette_{sex}.jpg`，CSS 多背景自动兜底）。本 fork 全部补齐，详见
+**[立绘补齐说明](./docs/CHARACTER-IMAGES.md)** —— 含完整映射表、复查脚本、以及给新武将补图的规格要求。
+
+一句话结论：2494 个武将条目现在**零剪影**。手段分三类：从上游下载真图（4 个）、
+`img:` 字段复用同一人物的其它版本立绘（35 个）、外部找图转码补入（6 个）。
+
+配套两个脚本（同步上游后跑一次审计即可知道有没有新的缺图）：
+
+```bash
+node scripts/audit-character-images.cjs        # 审计缺图，并给出可复用的同人物候选
+python scripts/fit-character-image.py <图> <id>  # 外部找的图转成 350×464 规格并落位
+```
+
 ---
 
 ## 部署（Cloudflare）

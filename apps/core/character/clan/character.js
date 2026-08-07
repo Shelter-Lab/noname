@@ -69,6 +69,8 @@ const characters = {
 		hp: 4,
 		skills: ["clangaojin", "clanmuyin"],
 		clans: ["陈留吴氏"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 clan_wuyi 的图)
+		img: "image/character/wuyi.jpg",
 	},
 	clan_wuxian: {
 		sex: "female",

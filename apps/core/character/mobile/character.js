@@ -17,12 +17,16 @@ const characters = {
 		group: "wei",
 		hp: 3,
 		skills: ["mbzhaofu", "mbqiliu"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 mb_dingshangwan 的图)
+		img: "image/character/dingshangwan.jpg",
 	},
 	re_wangji: {
 		sex: "male",
 		group: "wei",
 		hp: 3,
 		skills: ["reqizhi", "rejinqu"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 re_wangji 的图)
+		img: "image/character/wangji.jpg",
 	},
 	re_zhoufei: {
 		sex: "female",
@@ -43,6 +47,8 @@ const characters = {
 		group: "shu",
 		hp: 4,
 		skills: ["mbgxchiyuan", "mberdi"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 mb_gaoxiang 的图)
+		img: "image/character/gaoxiang.jpg",
 	},
 	mb_cuimao: {
 		sex: "male",
@@ -101,6 +107,8 @@ const characters = {
 		hp: 4,
 		skills: ["mbtongwei", "mbcuguo"],
 		names: "夏侯|楙",
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 mb_xiahoumao 的图)
+		img: "image/character/xiahoumao.jpg",
 	},
 	o_tadun: {
 		sex: "male",

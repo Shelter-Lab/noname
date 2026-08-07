@@ -4,24 +4,32 @@ const characters = {
 		group: "shu",
 		hp: 4,
 		skills: ["olxiansi", "olqinling"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_liufeng 的图)
+		img: "image/character/liufeng.jpg",
 	},
 	ol_bulianshi: {
 		sex: "female",
 		group: "wu",
 		hp: 3,
 		skills: ["olanxu", "olzhuiyi"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_bulianshi 的图)
+		img: "image/character/bulianshi.jpg",
 	},
 	ol_quancong: {
 		sex: "male",
 		group: "wu",
 		hp: 4,
 		skills: ["olyaoming"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_quancong 的图)
+		img: "image/character/quancong.jpg",
 	},
 	ol_caoxiu: {
 		sex: "male",
 		group: "wei",
 		hp: 4,
 		skills: ["olqianju", "olqingxi"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_caoxiu 的图)
+		img: "image/character/caoxiu.jpg",
 	},
 	ol_guanping: {
 		sex: "male",
@@ -308,6 +316,8 @@ const characters = {
 		hp: 3,
 		skills: ["reyanzhu", "rexingxue", "xinzhaofu"],
 		isZhugong: true,
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_sunxiu 的图)
+		img: "image/character/sunxiu.jpg",
 	},
 	ol_sb_zhangxiu: {
 		sex: "male",
@@ -320,12 +330,16 @@ const characters = {
 		group: "shu",
 		hp: 4,
 		skills: ["olsbnilan", "olsbjueya"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_sb_zhaoyun 的图)
+		img: "image/character/zhaoyun.jpg",
 	},
 	ol_sb_zhangfei: {
 		sex: "male",
 		group: "shu",
 		hp: 4,
 		skills: ["olsbjingxian", "olsbxieyong"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_sb_zhangfei 的图)
+		img: "image/character/zhangfei.jpg",
 	},
 	ol_sb_huangyueying: {
 		sex: "female",
@@ -338,6 +352,8 @@ const characters = {
 		group: "qun",
 		hp: 3,
 		skills: ["olsbguliang", "olsbxutu"],
+		// 无自有立绘,复用同一人物的本体立绘(上游未提供 ol_sb_jushou 的图)
+		img: "image/character/dc_sb_jushou.jpg",
 	},
 	ol_sb_gongsunzan: {
 		sex: "male",
