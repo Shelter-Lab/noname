@@ -32,7 +32,8 @@
 | `Response served by service worker has redirections` 白屏 | CF 把 `/index.html` 307 重定向到 `/`,SW 缓存了 redirected 响应;iOS 禁止 SW 返回 redirected 响应 | `sanitizeResponse()`:redirected 响应用响应体重建干净副本再缓存/返回。`start_url` 改 `/` 避免重定向 |
 | `localStorage null is not an object` 崩溃 | iOS PWA/隐私模式下 localStorage 可能为 null | index.html 最早期做内存兜底(usable 探测→内存实现) |
 | 冷启动"加载内容失败(undefined)" | 冷启动并发拉大量文件、SW 未接管,偶发失败 | 超时 30s + boot 失败自动 reload 重试一次(sessionStorage 防死循环) |
-| **断网启动白屏几十秒 / 弹"未正常载入"** | **SW 对未命中缓存的资源用无超时 fetch(pwa-sw.js);iOS 断网 fetch 永久 pending → 启动 script 永不 load → 30秒看门狗弹框** | **见下「断网白屏根治方案」** |
+| **断网启动白屏几十秒 / 弹"未正常载入"(真凶)** | **iOS 主屏 PWA 的 UA 缺"Safari"→ `get.is.safari()=false` → 启用沙盒 → `initializeSandboxRealms` 建 about:blank iframe 加载 sandbox.js;该 iframe 子请求在 iOS WebKit 上【不走父页 SW】→ 断网永久 pending → `await`(initRealms.js:118)永久挂 → 30秒看门狗弹框。SW 超时对它无效(请求没进 SW)** | **根治:`init/index.ts:53` 加 `&& lib.device !== "ios"` 让 iOS 也跳过沙盒(和 Safari 浏览器一致,已验证能进)。沙盒仅隔离联机远程代码、单机不依赖,且本 fork 编译期已禁用沙盒(initRealms.js SANDBOX_ENABLED=false),跳过零副作用 |
+| SW 未命中缓存的资源断网 fetch 永久 pending | 未命中用无超时 fetch;iOS 断网 fetch 不 reject | miss 分支超时分档(见下),但注意:绕过 SW 的请求(如沙盒 iframe)此法无效,那类要从源头跳过 |
 | jit-test.ts / service-worker.js 断网加载失败 | 这些 dist 根级散文件漏在预缓存清单外(清单只扫子目录) | build.ts 补扫 dist 根一层的 .js/.ts 进核心清单 |
 
 ### 断网白屏根治方案(超时两难的正解)
@@ -66,7 +67,7 @@
 - **iOS 新版 Edge/Chrome 也能装 PWA、能用**(不是只有 Safari;但底层都是 WebKit)
 - **无痕模式不支持 SW**,断网必失败——测离线要用普通 Safari/主屏 PWA,不能无痕
 - `audio.volume` 被 iOS 忽略(音量滑块无效,要绕得改 Web Audio GainNode,未做);无法代码强制横屏
-- **主屏 PWA UA 常不含"Safari"** → `get.is.safari()=false` → 启用沙盒(走 sandbox.js iframe 加载);Safari 浏览器 UA 含"Safari"→跳过沙盒。这曾是"浏览器能进、主屏 PWA 白屏"的分叉点,现由 miss 分支的 destination=script 快失败统一覆盖(sandbox.js 命中缓存即秒开,未命中快失败,不再卡)
+- **BGM 自动播放报 `NotAllowedError`**:浏览器/iOS 安全策略禁止无交互自动播放,用户点一下即恢复。无害,但会被全局 onerror 弹窗打扰。修法:index.html 的 `window.onerror` 里识别 NotAllowedError / "not allowed by the user agent" → 只 console 不 alert。偶发(看 BGM 播放时机是否早于首次交互)
 
 ---
 
@@ -96,3 +97,23 @@
 - 本地纯静态验证:`cd dist && python -m http.server`(无 /checkFile 接口,等效 CF)。跑完停掉服务器,否则锁 dist 导致 build.ts 的 `fs.rm("dist")` 报 EBUSY
 - iOS 主屏 PWA 调试:iPhone 设置→Safari→高级→网页检查器;Mac Safari 开发菜单→选 iPhone→主屏 PWA **单独列出**(独立 origin)。断网后看 Network 标签哪个请求一直 pending = 白屏元凶
 - macOS Safari 和 iOS Safari 同 WebKit,行为基本一致,可直接 Mac Safari 测离线(断 WiFi 刷新)
+
+---
+
+## 五、同步上游更新后需重新确认的改动清单
+
+本 fork 改了若干**官方文件**(不是新增文件)。同步 `libnoname/noname` 上游后,若上游也动了这些文件可能冲突/被覆盖,照此清单逐个核对、被覆盖的补回来:
+
+| 文件 | 我们的改动 | 检查点 |
+|---|---|---|
+| `apps/core/noname/init/browser.js` | 文件接口退回 URL + IndexedDB(纯静态模式) | 探测文件服务器 + 读写走 fetch/IndexedDB 还在吗 |
+| `apps/core/noname/init/index.ts` | ①启动超时 30s ②`sandboxEnabled` 加 `&& lib.device !== "ios"`(跳沙盒治白屏) | 这两处还在吗 |
+| `apps/core/index.html` | ①localStorage 内存兜底 ②PWA meta/SW 注册 ③onerror 忽略 NotAllowedError ④QUERY_PRECACHE | 这几段内联脚本还在吗 |
+| `apps/core/noname/game/index.js` | ①createServer/connect 的 PeerJS 分流 ②createServer 开头 `if(!lib.node)lib.node={}` | 联机 P2P 分流还在吗 |
+| `apps/core/noname/library/element/content.ts` | waitForPlayer 改 `await game.createServer()` | 还在吗 |
+| `apps/core/mode/connect.js` | 「创建房间」按钮 + 不弹邀请链接 confirm | 还在吗 |
+| `apps/core/noname/library/init/index.js` | 下载离线资源(downloadOfflineAssets)增量补课 | 还在吗 |
+| `apps/core/noname/ui/create/index.js` | 分享文本改房间号引导 | 还在吗 |
+| `apps/core/noname/ui/create/menu/pages/otherMenu.js` | 检查更新按钮 + 双主页链接 | 还在吗 |
+| `scripts/build.ts` | ①产物校验 ②生成 pwa-core/all-assets.json(含 dist 根散文件) | 清单生成还在吗 |
+| 新增文件(不会冲突) | `pwa-sw.js`、`manifest.webmanifest`、`peerAdapter.js`、`wrangler.jsonc`、`image/pwa/*`、本文档、README-PWA.md | 上游不会动,一般安全 |

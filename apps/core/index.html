@@ -117,6 +117,14 @@
 		"use strict";
 		(() => {
 			window.onerror = function (msg, src, line, column, err) {
+				// 忽略"音频/视频自动播放被浏览器拦截"这类无害错误(NotAllowedError):
+				// 浏览器/iOS 安全策略不允许无交互自动播放,用户点一下即恢复,不该弹窗打扰。
+				const errName = (err && err.name) || "";
+				const msgStr = String(msg || "");
+				if (errName === "NotAllowedError" || msgStr.includes("NotAllowedError") || msgStr.includes("not allowed by the user agent")) {
+					console.warn("[忽略无害错误] 媒体自动播放被拦截:", msgStr);
+					return;
+				}
 				let str = `错误文件: ${typeof src == "string" && src.length > 0 ? decodeURI(src) : "未知文件"}`;
 				str += `\n错误信息: ${msg}`;
 				str += `\n行号: ${line}`;

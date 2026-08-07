@@ -50,7 +50,13 @@ export async function boot() {
 		await import("./compatible.js");
 	}
 
-	const sandboxEnabled = !config.get("debug") && !get.is.safari();
+	// iOS(含主屏 PWA)与 Safari 浏览器一致跳过沙盒。
+	// 原因:iOS 主屏 PWA 的 UA 常缺 "Safari" 致 is.safari() 漏判 → 启用沙盒 →
+	// initializeSandboxRealms 建 about:blank iframe 加载 sandbox.js,而该 iframe 子请求在
+	// iOS WebKit 上【不走父页 Service Worker】→ 断网时永久 pending → 卡到 30s 弹"未正常载入"白屏。
+	// 且沙盒仅隔离联机远程代码、单机/本体不依赖它,本 fork 更是编译期禁用了沙盒(SANDBOX_ENABLED=false),
+	// 故 iOS 跳过零副作用,只是省掉那个会卡死的无用 iframe 加载。用 lib.device 而非 UA 判断更稳。
+	const sandboxEnabled = !config.get("debug") && !get.is.safari() && lib.device !== "ios";
 
 	// 初始化沙盒的Realms
 	await initializeSandboxRealms(sandboxEnabled);
