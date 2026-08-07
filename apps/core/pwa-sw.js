@@ -178,32 +178,33 @@ self.addEventListener("fetch", event => {
 			const cache = await caches.open(CACHE);
 			const cached = await cache.match(req);
 
-			// 后台拉取并更新缓存(fetchSafe 带超时,Safari 断网不会永久挂)
-			const fetchAndUpdate = fetchSafe(req)
-				.then(async resp => {
-					// 只缓存成功的完整响应(200)。不透明响应(跨源)已被上面过滤
-					if (resp && resp.status === 200) {
-						// 洗白重定向后再缓存(iOS 不接受 redirected 响应)
-						const clean = await sanitizeResponse(resp.clone());
-						cache.put(req, clean);
-					}
-					return resp;
-				})
-				.catch(() => null);
-
-			// 命中缓存:立即返回(离线可玩),后台静默更新。
-			// 缓存里的响应经 sanitize 过是干净的;仍兜底洗白一次防旧数据。
 			if (cached) {
-				fetchAndUpdate;
+				// 命中缓存:立即返回(离线可玩),后台静默更新。
+				// 后台用 fetchSafe(短超时):Safari 断网挂住也无所谓,不阻塞。
+				fetchSafe(req)
+					.then(async resp => {
+						if (resp && resp.status === 200) {
+							const clean = await sanitizeResponse(resp.clone());
+							cache.put(req, clean);
+						}
+					})
+					.catch(() => {});
 				return await sanitizeResponse(cached);
 			}
 
-			// 未命中:等网络,拿到就返回。返回给页面的也要洗白(否则 iOS 报 redirections)
-			const fresh = await fetchAndUpdate;
-			if (fresh) return await sanitizeResponse(fresh);
-
-			// 彻底失败(离线且没缓存过)
-			return new Response("离线且资源未缓存", { status: 504, statusText: "Offline" });
+			// 未命中:必须等网络。用原生 fetch(不加超时),让大文件下载有充分时间。
+			// Safari 断网时这里会 pending → 但未缓存的资源本来就需要网络,
+			// 真离线时前面的 navigate handler 已兜底返回 index.html。
+			try {
+				const resp = await fetch(req);
+				if (resp && resp.status === 200) {
+					const clean = await sanitizeResponse(resp.clone());
+					cache.put(req, clean);
+				}
+				return await sanitizeResponse(resp);
+			} catch {
+				return new Response("离线且资源未缓存", { status: 504, statusText: "Offline" });
+			}
 		})()
 	);
 });
