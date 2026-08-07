@@ -90,26 +90,6 @@
 					}
 				} catch (e) { /* ignore */ }
 				navigator.serviceWorker.register("./pwa-sw.js").catch(err => console.warn("PWA SW 注册失败:", err));
-
-				// 联网时查询核心预缓存是否下齐:没下齐则提示联网重开,避免之后离线撞白屏。
-				// (只在联网时提示——离线提示无意义;延迟几秒等 SW install 跑完对账)
-				if (navigator.onLine) {
-					setTimeout(async () => {
-						try {
-							const sw = navigator.serviceWorker.controller;
-							if (!sw) return;
-							const status = await new Promise((resolve) => {
-								const ch = new MessageChannel();
-								ch.port1.onmessage = e => resolve(e.data);
-								sw.postMessage({ type: "QUERY_PRECACHE" }, [ch.port2]);
-								setTimeout(() => resolve(null), 3000);
-							});
-							if (status && status.complete === false && status.missing > 0) {
-								console.warn(`[PWA] 核心离线资源未下齐(缺 ${status.missing}/${status.total}),建议保持联网再打开一次以补齐,否则断网可能无法启动。`);
-							}
-						} catch (e) { /* ignore */ }
-					}, 8000);
-				}
 			});
 		}
 	</script>

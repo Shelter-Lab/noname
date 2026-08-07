@@ -30,9 +30,10 @@ function fetchSafe(input, init, ms = 2000) {
 // 决定"未命中缓存的请求"该用多长超时(0=不超时)。用两个正交、无状态的请求级信号分档,
 // 一个治断网启动白屏、一个保"下载离线资源"不被误杀,互不打架:
 //  - 下载器 + 清单:唯一带 cache:"no-cache" 进 handler 的请求 → 绝不超时(避开历史坑:2s 误杀下载)
-//  - 启动关键资源(script/style/document/font):确定离线时快速失败(4s),不再永久 pending 卡到 30s 弹"未正常载入"白屏;
-//    在线(含慢网首访)给足 15s,避免误杀。用 navigator.onLine===false 门控(iOS 上 false 基本可信)
-//  - 图片/音频/视频等运行期大素材:不超时(断网顶多贴图裂,不白屏;在线慢网正常等)
+//  - 其余所有请求:确定离线(navigator.onLine===false)时都给超时快失败,避免 WebKit 断网 fetch 永久
+//    pending 卡到 30s 白屏。启动关键资源(script/style/document/font)4s;其余(XHR/.ts JIT源/import 子资源
+//    destination="" / image / audio)也给 8s——【关键】ffb5b66 曾把这些改成无超时(default:0),
+//    正是它们断网永久 pending 导致 Safari 离线白屏回归。在线时给足时长避免误杀慢网/首访。
 function missTimeoutMs(req) {
 	if (req.cache === "no-cache") return 0;
 	const offline = self.navigator && self.navigator.onLine === false;
@@ -43,7 +44,8 @@ function missTimeoutMs(req) {
 		case "font":
 			return offline ? 4000 : 15000;
 		default:
-			return 0;
+			// XHR/.ts/import子资源/图片/音频等:离线8s快失败(不永久pending),在线不限时
+			return offline ? 8000 : 0;
 	}
 }
 
@@ -61,14 +63,11 @@ async function sanitizeResponse(resp) {
 	});
 }
 
-// 预缓存完整性标记:存进缓存的一个特殊 key(SW 里没有 localStorage)。
-// 页面侧通过 SW 消息查询"核心是否全下完",没下全就提示联网重开,避免离线撞白屏。
-const PRECACHE_FLAG_URL = "/__precache_status__";
-
 self.addEventListener("install", event => {
 	// install 阶段预缓存"启动+标准对局必需"的核心文件(约 32MB,清单由构建生成)。
-	// 保证断网时也能稳定启动、进模式、玩标准局。
-	// 加失败重试 + 对账:只有真正全下齐才标记完成,避免"首访网抖漏文件却标记成功→离线白屏"。
+	// 保证断网时也能稳定启动、进模式、玩标准局。失败不阻塞安装(降级为访问即缓存)。
+	// 注:保持简单快速——曾加"重试3轮+对账709项"导致 install 变慢/在 Safari 上迟迟装不上,
+	//     反而让离线失败(回归),故回退到简单版。预缓存完整性靠 fetch 事件的访问即缓存兜底。
 	event.waitUntil(
 		(async () => {
 			try {
@@ -76,54 +75,20 @@ self.addEventListener("install", event => {
 				if (!resp.ok) throw new Error("核心清单获取失败 " + resp.status);
 				const list = await resp.json();
 				const cache = await caches.open(CACHE);
-
-				// 下载一批,返回失败的 url 列表
-				const downloadBatch = async urls => {
-					const failed = [];
+				// 分批下载,避免一次性数百请求压垮 iOS;单批失败不影响其余。
+				// 用 fetch+sanitize 而非 cache.add,以便洗白重定向响应(iOS 不接受 redirected 缓存)。
+				const BATCH = 50;
+				for (let i = 0; i < list.length; i += BATCH) {
+					const batch = list.slice(i, i + BATCH);
 					await Promise.allSettled(
-						urls.map(async url => {
-							try {
-								const r = await fetch(url, { cache: "no-cache" });
-								if (r && r.status === 200) await cache.put(url, await sanitizeResponse(r));
-								else failed.push(url);
-							} catch (e) {
-								failed.push(url);
-							}
+						batch.map(async url => {
+							const r = await fetch(url, { cache: "no-cache" });
+							if (r && r.status === 200) await cache.put(url, await sanitizeResponse(r));
 						})
 					);
-					return failed;
-				};
-
-				// 首轮分批下载
-				const BATCH = 50;
-				let pending = [];
-				for (let i = 0; i < list.length; i += BATCH) {
-					const failed = await downloadBatch(list.slice(i, i + BATCH));
-					pending.push(...failed);
-				}
-				// 退避重试最多 3 轮,补下漏的
-				for (let round = 0; round < 3 && pending.length; round++) {
-					await new Promise(r => setTimeout(r, 1000 * (round + 1)));
-					pending = await downloadBatch(pending);
-				}
-
-				// 对账:核对清单里每一项是否真在缓存里
-				const missing = [];
-				for (const url of list) {
-					if (!(await cache.match(url))) missing.push(url);
-				}
-				const complete = missing.length === 0;
-				await cache.put(
-					PRECACHE_FLAG_URL,
-					new Response(JSON.stringify({ complete, total: list.length, missing: missing.length }), {
-						headers: { "Content-Type": "application/json" },
-					})
-				);
-				if (!complete) {
-					console.warn(`[pwa-sw] 核心预缓存未下齐:缺 ${missing.length}/${list.length},首例:`, missing[0]);
 				}
 			} catch (e) {
-				// 预缓存整体失败不致命:后续靠 fetch 事件的访问即缓存兜底
+				// 预缓存失败不致命:后续靠 fetch 事件的访问即缓存兜底
 				console.warn("[pwa-sw] 核心预缓存未完成:", e);
 			}
 			await self.skipWaiting();
@@ -131,24 +96,10 @@ self.addEventListener("install", event => {
 	);
 });
 
-// 收到页面消息:SKIP_WAITING(检查更新时立即接管)/ QUERY_PRECACHE(查询核心预缓存是否下齐)
+// 收到页面"检查更新"发来的 SKIP_WAITING → 立即接管,让新版生效(配合手动检查更新按钮)
 self.addEventListener("message", event => {
 	if (event.data && event.data.type === "SKIP_WAITING") {
 		self.skipWaiting();
-	} else if (event.data && event.data.type === "QUERY_PRECACHE") {
-		event.waitUntil(
-			(async () => {
-				let status = { complete: false, total: 0, missing: -1 };
-				try {
-					const cache = await caches.open(CACHE);
-					const r = await cache.match(PRECACHE_FLAG_URL);
-					if (r) status = await r.json();
-				} catch (e) {
-					/* ignore */
-				}
-				if (event.ports && event.ports[0]) event.ports[0].postMessage(status);
-			})()
-		);
 	}
 });
 
