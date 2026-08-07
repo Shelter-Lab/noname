@@ -27,25 +27,22 @@ function fetchSafe(input, init, ms = 2000) {
 		.catch(e => { clearTimeout(timer); throw e; });
 }
 
-// 决定"未命中缓存的请求"该用多长超时(0=不超时)。用两个正交、无状态的请求级信号分档,
-// 一个治断网启动白屏、一个保"下载离线资源"不被误杀,互不打架:
-//  - 下载器 + 清单:唯一带 cache:"no-cache" 进 handler 的请求 → 绝不超时(避开历史坑:2s 误杀下载)
-//  - 其余所有请求:确定离线(navigator.onLine===false)时都给超时快失败,避免 WebKit 断网 fetch 永久
-//    pending 卡到 30s 白屏。启动关键资源(script/style/document/font)4s;其余(XHR/.ts JIT源/import 子资源
-//    destination="" / image / audio)也给 8s——【关键】ffb5b66 曾把这些改成无超时(default:0),
-//    正是它们断网永久 pending 导致 Safari 离线白屏回归。在线时给足时长避免误杀慢网/首访。
+// 决定"未命中缓存的请求"该用多长超时(0=不超时)。
+// 【关键教训】不能靠 navigator.onLine 判离线:iOS 主屏 PWA 飞行模式下 onLine 常仍报 true,
+// 导致超时档失效→走无超时 fetch→WebKit 断网永久 pending→boot 的 await 挂死→30s 白屏(standalone 白屏真凶)。
+// 故 miss 一律给超时(不看 onLine)。命中缓存的请求根本不走这里(hit 分支秒返回),只有真未命中才 fetch,
+// 给超时快失败无害;下载器(no-cache)豁免不误杀。代价:在线极慢网的未命中请求也会被超时,可接受。
 function missTimeoutMs(req) {
-	if (req.cache === "no-cache") return 0;
-	const offline = self.navigator && self.navigator.onLine === false;
+	if (req.cache === "no-cache") return 0; // 下载离线资源:绝不超时(不误杀批量下载)
 	switch (req.destination) {
 		case "script":
 		case "style":
 		case "document":
 		case "font":
-			return offline ? 4000 : 15000;
+			return 4000; // 启动关键资源:未命中 4s 快失败,让启动继续,不卡 30s 看门狗
 		default:
-			// XHR/.ts/import子资源/图片/音频等:离线8s快失败(不永久pending),在线不限时
-			return offline ? 8000 : 0;
+			// XHR / .ts JIT源 / import 子资源(destination="") / 图片 / 音频等:8s 快失败
+			return 8000;
 	}
 }
 
