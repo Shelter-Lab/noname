@@ -204,5 +204,194 @@
 			};
 		})();
 	</script>
+	<script>
+		// —— PWA 缓存自修复:治"启动报 importing binding name 'x' is not found"(行列号 0)——
+		//
+		// 【病】产物文件名不带 hash(index4.js 永远叫 index4.js),而 vite 的 _virtual chunk 编号会随
+		// 依赖图漂移 —— 同一个 index4.js 上一版可能是别的模块、导出别的字母。一旦 Cache Storage 里
+		// 攒下"一部分旧版 + 一部分新版"的代码文件,而 ES 模块图是整体链接的,新 cacheContext.js 向旧
+		// index4.js 要 { c } 就拿不到 → link 阶段 SyntaxError(不属于任何一行,故行列号 0)→ 白屏。
+		// 这种状态**不会自愈**:SW 若认为自己版本一致,压根不会去网络重取。
+		//
+		// 【为什么修复代码放在 index.html 里】它是唯一能在"模块图已经坏掉"时还确定能跑的地方:
+		//  1. index.html 不参与 ES 模块图,新旧混搭对它无害 —— 而病根恰恰是模块图必须整版一致;
+		//  2. 内联脚本不是 module,不受模块链接失败牵连(已实测:链接报错时内联脚本照常执行);
+		//  3. SW 的导航分支是 SWR —— 本次给旧 index.html,同时把新的写回缓存,所以新版修复代码
+		//     总能在下一次启动到位,不需要用户做任何事。
+		//
+		// 【怎么绕开"正在喂你旧字节"的那个 SW】这是本方案唯一的死结:旧 SW 命中缓存就返回,压根不看
+		// 请求的 cache 模式(cache:"reload" 只约束浏览器 HTTP 缓存,不约束 Cache Storage)。解法是给
+		// URL 挂一个一次性查询串:cache.match() 默认 ignoreSearch=false,带 ?__pwafix= 的 URL 在缓存里
+		// **必然未命中** → 旧 SW 只剩走网络一条路 → 拿到服务器上的真字节 → 再写回**干净 URL**覆盖旧的。
+		// 用一个缓存里不可能存在的 key 骗它去联网,这就是破局点。
+		(function () {
+			"use strict";
+			if (!("caches" in window)) return;
+
+			var FIX_PARAM = "__pwafix";
+			var MARK = "__pwafixed";
+			var CACHE = "noname-pwa-v2";
+			// 只重灌代码文件。立绘/语音(约 1GB)一个都不碰,更不清空缓存 —— 用户不该为一次构建事故重下素材。
+			var CODE_EXT = /\.(js|mjs|ts|css|html|json|webmanifest)$/i;
+			var running = false;
+
+			// 只认"模块图链接不上"这一类错误,别的错误一律不碰(免得把普通 bug 也当缓存问题瞎重灌)。
+			// 两个引擎措辞不同,都要覆盖:
+			//   WebKit(iOS): Importing binding name 'c' is not found. / Indirectly exported binding name ...
+			//   V8(Chrome):  The requested module './x.js' does not provide an export named 'c'
+			function looksMixed(msg) {
+				return /importing binding name|indirectly exported binding name|does not provide an export/i.test(String(msg || ""));
+			}
+
+			var tip = null;
+			function say(text) {
+				if (!tip) {
+					tip = document.createElement("div");
+					tip.setAttribute("style", "position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;text-align:center;padding:6vmin;font-size:4vmin;line-height:1.8;white-space:pre-wrap;");
+					(document.body || document.documentElement).appendChild(tip);
+				}
+				tip.textContent = text;
+			}
+			function hideTip() {
+				if (tip && tip.parentNode) tip.parentNode.removeChild(tip);
+				tip = null;
+			}
+
+			// iOS Safari 不接受 SW 返回"经过重定向的响应",这种响应缓存下来后由 SW 服务会整页报错。
+			// 页面侧写缓存同样要洗白(SW 里的 sanitizeResponse 是一个道理)。
+			async function clean(resp) {
+				if (!resp.redirected) return resp;
+				return new Response(await resp.blob(), { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+			}
+
+			/** 固定并发跑完 items,返回失败项 */
+			async function pool(items, limit, worker) {
+				var idx = 0;
+				var fails = [];
+				var lanes = [];
+				for (var i = 0; i < Math.min(limit, items.length); i++) {
+					lanes.push(
+						(async function () {
+							while (idx < items.length) {
+								var item = items[idx++];
+								try {
+									await worker(item);
+								} catch (e) {
+									fails.push(item);
+								}
+							}
+						})()
+					);
+				}
+				await Promise.all(lanes);
+				return fails;
+			}
+
+			async function repair() {
+				if (running) return;
+				running = true;
+				say("检测到缓存版本不一致,正在自动修复…\n请保持联网,不要关闭");
+				// 一次性查询串:只为让请求在 Cache Storage 里必然未命中,从而逼旧 SW 走网络
+				var bust = FIX_PARAM + "=" + Date.now();
+				var withBust = function (u) {
+					return u + (u.indexOf("?") === -1 ? "?" : "&") + bust;
+				};
+				// 【为什么是 no-cache 而不是 reload】旧 SW 的 missTimeoutMs 对 no-cache 返回 0(不超时),
+				// 且"疑似离线就直接返 504"的短路只在有超时档时生效 —— 等于按"下载离线资源"的待遇放行。
+				// 用 reload 会吃 8s 超时,慢网下大批失败,还可能把 SW 的 failStreak 推到离线模式,
+				// 后续请求全部秒 504,整个修复一起崩。
+				var opts = { cache: "no-cache" };
+				var cache = await caches.open(CACHE);
+
+				var resp = await fetch(withBust("./pwa-core-assets.json"), opts);
+				if (!resp.ok) throw new Error("核心清单获取失败 " + resp.status);
+				var list = (await resp.json()).filter(function (p) {
+					return CODE_EXT.test(p);
+				});
+				if (!list.length) throw new Error("核心清单为空");
+
+				var done = 0;
+				var put = async function (u) {
+					var r = await fetch(withBust(u), opts);
+					if (!r || r.status !== 200) throw new Error("取不到 " + u);
+					// 【key 必须是干净 URL】带 query 写进去等于没换版,页面下次要的还是干净 URL。
+					// index.html 额外再写一份 "/":SW 导航分支优先匹配 "/",漏了它会继续启动旧首页。
+					if (/\/index\.html$/.test(u)) await cache.put("/", await clean(r.clone()));
+					await cache.put(u, await clean(r));
+					say("正在修复缓存… " + ++done + "/" + list.length + "\n请保持联网,不要关闭");
+				};
+
+				var fails = await pool(list, 12, put);
+				if (fails.length) fails = await pool(fails, 6, put); // 抖动多是瞬时的,重试一轮
+
+				// 旧 SW 会把带 ?__pwafix= 的请求也顺手缓存下来(未命中→取回→put),不清掉白占几十 MB。
+				// 真实资源 URL 不可能含这个参数,按参数名精确匹配,不会误删素材。
+				var keys = await cache.keys();
+				await Promise.all(
+					keys
+						.filter(function (k) {
+							return k.url.indexOf(FIX_PARAM + "=") !== -1;
+						})
+						.map(function (k) {
+							return cache.delete(k);
+						})
+				);
+
+				if (fails.length) {
+					// 没换齐就不刷:刷了大概率还是坏的,只是白转一圈。已写进去的都是当前构建的字节,
+					// 缓存只会比之前更接近一致,下次启动再试会继续收敛,不会更糟。
+					throw new Error("仍有 " + fails.length + " 个文件没换成");
+				}
+
+				// 整批代码已是同一构建 → 把构建戳补上、清掉"待补清单",让 SW 直接信任缓存(不白跑网络)
+				try {
+					var vr = await fetch(withBust("./pwa-version.json"), opts);
+					var build = vr.ok ? (await vr.json()).build : null;
+					if (build) await cache.put("/__pwa_build__", new Response(build, { headers: { "Content-Type": "text/plain" } }));
+					await cache.delete("/__pwa_stale__");
+				} catch (e) {
+					/* 戳没写上不影响正确性,最多下次启动多走几个网络请求 */
+				}
+
+				say("修复完成,正在重新启动…");
+				// 【防循环守卫用 hash,不用 sessionStorage】standalone 下 sessionStorage 可能退化成内存实现
+				// (见本文件顶部兜底),那样"只修一次"的标记读出来恒为空 → 修完刷、刷完再修 → 无限循环。
+				// hash 跟着 location.reload() 天然留存,且本项目没有任何代码使用 location.hash(已 grep 确认)。
+				location.hash = MARK;
+				location.reload();
+			}
+
+			// 手动入口:控制台里跑 __pwaRepair() 也能修(自动触发没赶上时的兜底)
+			window.__pwaRepair = function () {
+				return repair().catch(function (e) {
+					hideTip();
+					alert("缓存修复未完成:" + (e && e.message ? e.message : e) + "\n请确认联网后重新打开。");
+				});
+			};
+
+			// 这一轮已经修过了(hash 上有标记):不再重修,把原始报错照常弹出来,免得掩盖真问题。
+			var alreadyTried = location.hash.indexOf(MARK) !== -1;
+			if (alreadyTried) {
+				// 撑过 20 秒没再报模块错 = 修复生效了,把标记摘掉(否则它会一直挡着以后真正需要的修复)
+				setTimeout(function () {
+					if (location.hash.indexOf(MARK) !== -1) {
+						try {
+							history.replaceState(null, "", location.pathname + location.search);
+						} catch (e) {}
+					}
+				}, 20000);
+			}
+
+			// 包一层既有的 onerror,不改它的逻辑:命中就接手修复,不命中原样交回去(照旧 alert)。
+			var prev = window.onerror;
+			window.onerror = function (msg, src, line, column, err) {
+				if (!alreadyTried && !running && looksMixed(msg)) {
+					window.__pwaRepair();
+					return true;
+				}
+				return typeof prev === "function" ? prev.apply(this, arguments) : void 0;
+			};
+		})();
+	</script>
 	<script type="module" src="./noname/entry.ts"></script>
 </head>

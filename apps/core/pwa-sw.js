@@ -387,7 +387,18 @@ self.addEventListener("fetch", event => {
 				// 命中缓存:立即返回(离线可玩),后台静默更新。
 				// 疑似离线时跳过 revalidate:否则冷启动会并发几百个注定失败的 fetch,把 SW 的
 				// 单线程事件循环堵住,拖慢真正需要网络的请求(离线启动变慢的一大来源)。
-				if (!looksOffline()) {
+				//
+				// 【代码文件绝不后台改写 —— 混搭的真正源头就在这里】
+				// 以前代码文件也走这个 revalidate:于是每次部署后,还没换版的旧 SW 会一边把旧字节
+				// 喂给页面、一边把新构建的字节偷偷写进缓存,而 BUILD_KEY 仍写着旧戳。缓存就这样被
+				// 自己搅成"一部分旧版 + 一部分新版",且**自称一致**。只要紧接着的 install 成功,
+				// 全量 reload 会把它抹平,所以平时看不出来;但 install 没成那一次(SW 脚本请求失败/
+				// iOS 掐后台/那次导航没触发更新检查),下次启动就直接从缓存喂混搭代码 →
+				// 模块图链接失败 → "importing binding name 'c' is not found",行列号 0。
+				// 而且此时联网也救不了:它认为自己一致,压根不去网络。
+				// 故:代码文件只允许由 install 整版写入(cache:"reload" 全量),永不逐文件更新。
+				// 顺带每次启动省掉 600+ 个无用的后台请求。素材照旧 SWR,不受影响。
+				if (!looksOffline() && !isCodeAsset(url.pathname)) {
 					fetchSafe(req)
 						.then(async resp => {
 							noteNetResult(true);
