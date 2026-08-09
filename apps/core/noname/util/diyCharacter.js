@@ -21,6 +21,8 @@ const INDEX_KEY = "pwa_diy_characters";
 export const PACK_NAME = "pwa_diy";
 /** 立绘在 image 仓里的 key 前缀 */
 const IMAGE_PREFIX = "pwa_diy:";
+/** 「包开关是否已初始化过」标记，用来区分「用户主动关了」和「首次还没默认开」 */
+const PACK_NAME_INITED = "pwa_diy_pack_inited";
 
 /**
  * 一条 DIY 武将记录
@@ -199,6 +201,14 @@ export async function injectDiyCharacters() {
 	if (!list.length) {
 		return 0;
 	}
+	// 尊重「武将」tab 里的包开关：本体包关掉后重启就不装进 lib.character 了
+	// （loading.ts:143 那个 `!lib.config.characters.includes(name)` 分支），
+	// 自建包也得照办，否则关了永远不生效。registerPack 得先跑，
+	// 不然菜单里连这个开关都不显示，用户就没法再开回来。
+	registerPack();
+	if (!isPackEnabled()) {
+		return 0;
+	}
 	let injected = 0;
 	for (const record of list) {
 		if (await injectDiyCharacter(record)) {
@@ -217,7 +227,11 @@ export async function injectDiyCharacter(record) {
 	if (!record?.name) {
 		return false;
 	}
+	// 先登记（首次会默认开），再看开关：顺序反了的话第一次保存会被自己判成「包是关的」
 	registerPack();
+	if (!isPackEnabled()) {
+		return false;
+	}
 
 	// 技能只留现成且真实存在的，避免挑完技能后对应包被禁用导致崩
 	const skills = (record.skills || []).filter(skill => lib.skill[skill]);
@@ -236,17 +250,34 @@ export async function injectDiyCharacter(record) {
 	return true;
 }
 
-/** 登记自建武将包，让选将界面能算到它 */
+/**
+ * 包是否开启（「武将」tab 里的「自建武将 → 开启」开关）
+ * @returns {boolean}
+ */
+export function isPackEnabled() {
+	return Array.isArray(lib.config.characters) && lib.config.characters.includes(PACK_NAME);
+}
+
+/**
+ * 登记自建武将包，让「武将」tab 能列出它、选将界面能算到它。
+ * 只登记，不改开关状态——除了「从来没登记过」这一次给个默认开。
+ */
 function registerPack() {
 	lib.characterPack[PACK_NAME] ??= {};
 	lib.translate[`${PACK_NAME}_character_config`] = "自建武将";
-	// 包名必须在 lib.config.characters 里，否则选将界面算不到它
-	if (Array.isArray(lib.config.characters) && !lib.config.characters.includes(PACK_NAME)) {
+	// all.characters 是本次会话的「有哪些包」列表（不持久化），菜单靠它列按钮，必须每次都补
+	if (Array.isArray(lib.config.all?.characters) && !lib.config.all.characters.includes(PACK_NAME)) {
+		lib.config.all.characters.push(PACK_NAME);
+	}
+	// characters 是「哪些包开着」（持久化）。这里只做首次默认开：
+	// 之前无条件 push 回去，等于每次启动都把用户手动关掉的开关又打开，关不掉。
+	// 用一个独立的 flag 区分「用户主动关了」和「还没初始化过」。
+	if (Array.isArray(lib.config.characters) && !lib.config.characters.includes(PACK_NAME) && !lib.config[PACK_NAME_INITED]) {
 		lib.config.characters.push(PACK_NAME);
 		game.saveConfig("characters", lib.config.characters);
 	}
-	if (Array.isArray(lib.config.all?.characters) && !lib.config.all.characters.includes(PACK_NAME)) {
-		lib.config.all.characters.push(PACK_NAME);
+	if (!lib.config[PACK_NAME_INITED]) {
+		game.saveConfig(PACK_NAME_INITED, true);
 	}
 }
 

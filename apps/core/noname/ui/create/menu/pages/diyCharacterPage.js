@@ -6,7 +6,7 @@
  * 技能只能挑现成的，所以不需要 eval/sandbox，也不用担心代码注入。
  */
 import { ui, lib, get } from "noname";
-import { loadDiyList, loadDiyImage, saveDiyCharacter, deleteDiyCharacter, injectDiyCharacter, exportDiyCharacters, importDiyCharacters } from "@/util/diyCharacter.js";
+import { loadDiyList, loadDiyImage, saveDiyCharacter, deleteDiyCharacter, injectDiyCharacter, exportDiyCharacters, importDiyCharacters, isPackEnabled } from "@/util/diyCharacter.js";
 
 /**
  * @param {HTMLDivElement} page 面板容器，由 exetensionMenu 建好传进来
@@ -247,7 +247,14 @@ export function createDiyCharacterPage(page) {
 			await injectOne(name);
 			await refreshList();
 			resetForm();
-			hintLine.innerHTML = lib.config.mode === "connect" ? "已保存，联机模式下不会出现，换单机模式重开生效" : "已保存，本局即可选到";
+			if (lib.config.mode === "connect") {
+				hintLine.innerHTML = "已保存，联机模式下不会出现，换单机模式重开生效";
+			} else if (!isPackEnabled()) {
+				// 包被用户在「武将」tab 里关掉了，存得下但选将界面看不到，得说清楚
+				hintLine.innerHTML = "已保存，但「武将→自建武将」是关的，开了才能选到";
+			} else {
+				hintLine.innerHTML = "已保存，本局即可选到";
+			}
 		} catch (error) {
 			console.error(error);
 			hintLine.innerHTML = `保存失败：${error instanceof Error ? error.message : String(error)}`;
@@ -261,6 +268,8 @@ export function createDiyCharacterPage(page) {
 	 */
 	var injectOne = async function (name) {
 		// 联机模式不注入，理由同 init/index.ts 里的注入点
+		// 包开关的判断在 injectDiyCharacter 里（它会先 registerPack 再看开关，
+		// 顺序反了会让第一次保存的用户误判成「包是关的」）
 		if (lib.config.mode === "connect") {
 			return;
 		}
@@ -412,7 +421,14 @@ export function createDiyCharacterPage(page) {
 	help.innerHTML = '用现成技能捏武将，只存数据不存代码，重启不丢（「制作扩展」在网页版重启即失效）。<span style="opacity:0.7">联机模式不生效。</span>';
 	block(help, "padding:2px 12px 10px 12px;font-size:13px;line-height:18px;opacity:0.55;text-align:left;");
 
-	lib.setScroll(page);
+	// 【不要在这里调 lib.setScroll(page)】面板本身永远不是滚动容器（.menu-buttons 没有 overflow，
+	// 高度随内容长，scrollHeight 恒等于 offsetHeight），真正滚的是外面的 .right.pane
+	// （menu/index.js:143 已给它 setScroll）。而 touchScroll 有条 iOS 专属分支
+	// （ui/click/index.js:4660）：`scrollHeight <= offsetHeight+5` 就 e.preventDefault()。
+	// 挂在面板上必然命中 → touchmove 被取消 → 连带把 .right.pane 的原生滚动一起废掉，
+	// 表现就是 iOS 上整个面板拖不动（实测 preventDefault=true）。
+	// 底部留白：绝对定位的面板贴着 pane 底，最后一行容易被切。
+	page.style.paddingBottom = "10px";
 	resetForm();
 	return page;
 }
