@@ -117,11 +117,7 @@ pnpm serve    # 用 @noname/fs 起静态服务器伺服 dist/
 pnpm start    # build + serve
 ```
 
-纯静态验证（无文件服务器接口，等效 CF 环境）：
-
-```bash
-npx tsx packages/fs/src/entry.ts --server --dirname=./dist --port=8899
-```
+纯静态验证：`cd dist && python -m http.server`（无文件服务器接口，等效 CF 环境）。
 
 ---
 
