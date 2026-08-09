@@ -3,6 +3,7 @@ import { ui, game, get, ai, lib, _status } from "noname";
 import { delay } from "@/util/index.js";
 import { security } from "@/util/sandbox.js"
 import { Character } from "@/library/element/index.js";
+import { createDiyCharacterPage } from "./diyCharacterPage.js";
 
 export const extensionMenu = function (connectMenu) {
 	if (connectMenu) {
@@ -56,6 +57,11 @@ export const extensionMenu = function (connectMenu) {
 				continue;
 			}
 			if (node.mode == "create") {
+				continue;
+			}
+			// 自建武将面板不是扩展、也不在 lib.config.plays 里，落到下面的 else 会被打成
+			// 半透明并访问 node.link.firstChild.classList 直接报错
+			if (node.mode == "diy") {
 				continue;
 			}
 			if (node.mode && node.mode.startsWith("extension_")) {
@@ -2688,6 +2694,23 @@ export const extensionMenu = function (connectMenu) {
 			if (_thisUpdate) {
 				node.update();
 			}
+		};
+		if (!get.config("menu_loadondemand")) {
+			node._initLink();
+		}
+	})();
+	// 网页扩展（自建武将）：纯静态部署下「制作扩展」存出来的扩展重启后加载不回来（扩展代码走
+	// 原生 import() 去 fetch 一个 CDN 上不存在的路径），所以这里另开一条只存 JSON 的路
+	(function () {
+		if (!lib.db) {
+			return;
+		}
+		var page = ui.create.div("");
+		var node = ui.create.div(".menubutton.large", "网页扩展", start.firstChild, clickMode);
+		node.mode = "diy";
+		node._initLink = function () {
+			node.link = page;
+			createDiyCharacterPage(page);
 		};
 		if (!get.config("menu_loadondemand")) {
 			node._initLink();

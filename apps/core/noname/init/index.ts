@@ -596,6 +596,19 @@ export async function boot() {
 		await Promise.allSettled(lib.extensions.map(loadExtension));
 	}
 
+	// 注入 PWA 自建武将：必须在扩展全部加载完之后（否则技能可能还没就位）、
+	// 建 arena 之前（选将界面算候选池时要能看到）。
+	// 联机模式跳过：本体扩展默认 connect:false 也是这么被 loadExtension 跳掉的
+	// （init/loading.ts:232），主机多出几个客户端没有的武将会直接不同步。
+	if (lib.config.mode !== "connect") {
+		try {
+			const { injectDiyCharacters } = await import("@/util/diyCharacter.js");
+			await injectDiyCharacters();
+		} catch (error) {
+			console.error("注入自建武将失败", error);
+		}
+	}
+
 	if (lib.init.startBefore) {
 		lib.init.startBefore();
 		delete lib.init.startBefore;
