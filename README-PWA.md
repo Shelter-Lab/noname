@@ -2,7 +2,7 @@
 
 本仓库是 [libnoname/noname](https://github.com/libnoname/noname)（开源三国杀引擎「无名杀」）的一个 fork，
 在**不改动游戏引擎**的前提下，把它改造成**纯静态可部署、可安装到主屏、离线可玩的 PWA**，
-并新增**房间号 P2P 联机**（浏览器/PWA 也能当房主，无需 Node 服务器）。
+并新增**房间号 P2P 联机**（浏览器/PWA 也能当房主，无需 Node 服务器）和**自建武将**（纯 JSON，重启不丢）。
 
 在线体验：<https://noname.xuehaote.workers.dev/>（用 Safari/Edge/Chrome 打开 → 添加到主屏）
 
@@ -42,7 +42,30 @@
 ### 5. 手动检查更新
 「其它 → 更新」界面加「检查更新」按钮（纯手动），PWA 下拉取最新版并刷新，缓存保留。
 
-### 6. 补齐缺失的武将立绘（消除剪影）
+### 6. 网页扩展（自建武将）
+本体「扩展 → 制作扩展」在纯静态部署下**重启即失效**：它生成的扩展代码要靠原生 `import()` 去 fetch
+`/extension/<名>/extension.js`，这个路径在 CDN 上不存在。
+
+所以另开一条路——「扩展 → **网页扩展**」，不生成任何源码：
+- 武将定义以 **JSON 存 IndexedDB**（`data` 仓，key `pwa_diy_characters`），立绘作为 Blob 存 `image` 仓
+  （key 前缀 `pwa_diy:`），读出来转 data URL 挂到 `Character.img`
+- 技能**只能挑现成的**（`lib.skill` 里已有的，选一个武将再从它的技能里挑，衍生技也列出来），
+  所以完全不需要 eval / sandbox
+- 启动时由 [util/diyCharacter.js](apps/core/noname/util/diyCharacter.js) 注入运行期
+  （`lib.character` / `lib.characterPack.pwa_diy` / `lib.translate`）。注入点在
+  [init/index.ts](apps/core/noname/init/index.ts) 的扩展全部加载完之后、建 arena 之前——
+  早了技能可能还没就位，晚了选将界面算不到
+- **联机模式跳过注入**，理由同本体扩展默认 `connect:false`（`init/loading.ts:232`）：
+  主机多出几个客户端没有的武将会直接不同步
+- 立绘从手机自己的相册/文件选，导入导出走一个 JSON 文件（含 base64 立绘），可以在设备间搬
+
+用法：扩展 → 网页扩展 → 选头像、填姓名/显示名/体力/性别/势力 → 挑技能 → 保存，当局即可在选将界面选到。
+
+> 两个坑记一下：`menu.css:98` 有条 `.menu-buttons div { position: absolute }`，面板里所有普通 div
+> 都得自己覆盖成 `relative`，否则糊成一坨；`get.infoHp("4")` 对纯数字字符串返回 **0**，
+> 存之前必须先 `parseInt`（本体 `exetensionMenu.js:1191` 也是这么干的）。
+
+### 7. 补齐缺失的武将立绘（消除剪影）
 上游有一批武将**没有自己的立绘文件**，游戏会回落成性别剪影
 （[polyfill.ts](apps/core/noname/init/polyfill.ts) 给 `backgroundImage` 塞两个 url，
 第二个是 `default_silhouette_{sex}.jpg`，CSS 多背景自动兜底）。本 fork 全部补齐，详见
@@ -60,9 +83,15 @@ python scripts/fit-character-image.py <图> <id>  # 外部找的图转成 350×4
 
 ---
 
-## 部署（Cloudflare）
+## 部署（Cloudflare Workers Static Assets）
 
-Git 连接自动构建（Workers Static Assets），控制台配置：
+注意是 **Workers**，不是 Pages——域名 `*.workers.dev`，部署命令是 `wrangler deploy`
+（不是 `wrangler pages deploy`），仓库里也没有 `_headers` / `_redirects` / `functions/` 这些 Pages 专属文件。
+
+**`git push origin main` 即触发自动构建部署**（约 5-6 分钟），地址不变，
+手机上已装的 PWA 点「其它 → 更新 → 检查更新」就能拿到新版，不用重装、不用重下离线资源。
+
+Git 连接自动构建，控制台配置（这几项在 Cloudflare 控制台侧，不在仓库里）：
 
 | 项 | 值 |
 |---|---|
@@ -78,10 +107,14 @@ Git 连接自动构建（Workers Static Assets），控制台配置：
 
 ## 本地开发
 
+`package.json` 里**没有 deploy 脚本**（部署由 CF 侧的 Deploy command 执行），可用的就这几条：
+
 ```bash
 pnpm install
 pnpm dev      # 开发服务器（带文件服务器）
 pnpm build    # 构建到 dist/
+pnpm serve    # 用 @noname/fs 起静态服务器伺服 dist/
+pnpm start    # build + serve
 ```
 
 纯静态验证：`cd dist && python -m http.server`（无文件服务器接口，等效 CF 环境）。
