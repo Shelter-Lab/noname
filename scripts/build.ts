@@ -60,9 +60,17 @@ await Promise.all([
 	fs.cp("LICENSE", "dist/LICENSE"),
 	fs.cp("README.md", "dist/README.md"),
 	// PWA:清单与离线缓存 SW(纯静态部署可安装、离线可玩)
-	fs.cp("apps/core/manifest.webmanifest", "dist/manifest.webmanifest"),
-	fs.cp("apps/core/pwa-sw.js", "dist/pwa-sw.js")
+	fs.cp("apps/core/manifest.webmanifest", "dist/manifest.webmanifest")
+	// pwa-sw.js 不在这里直接 cp:要先把构建戳替换进去,见下方"生成 PWA 构建版本戳"
 ]);
+
+// 构建戳(YYMMDDHHmm 北京时间)。提到这里算,因为 pwa-sw.js 和 pwa-version.json 都要用。
+// CF 构建服务器在 UTC,加 8 小时转北京时间,用户看到的数字与 push 时间对得上。
+const buildStamp = (() => {
+	const now = new Date(Date.now() + 8 * 3600_000); // UTC+8 北京时间
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${String(now.getUTCFullYear()).slice(2)}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}`;
+})();
 
 // 生成 PWA 离线资源清单(供 SW 预缓存 + 游戏内一键下载使用)
 console.log("生成 PWA 资源清单");
@@ -105,12 +113,18 @@ console.log("生成 PWA 资源清单");
 	console.log(`  可下载资源清单: ${heavy.length} 文件`);
 }
 
-// 生成 PWA 构建版本戳(YYMMDDHHmm 北京时间),用于界面上确认当前跑的是哪个构建。
-// CF 构建服务器在 UTC,加 8 小时转北京时间,用户看到的数字与 push 时间对得上。
+// 写出构建版本戳:pwa-version.json 给界面显示,同时把戳替换进 pwa-sw.js。
+// 【为什么 SW 里也要有戳】浏览器判断"有没有新 SW"只看 pwa-sw.js 的**字节**变没变。
+// 以前这文件内容恒定,每次部署浏览器都认为 SW 没变 → reg.update() 找不到新版
+// → 「检查更新」永远弹"已是最新版本";而且没有 install 就没有代码整版换新的时机,
+// 逐文件 SWR 会把缓存搞成跨版本混搭(chunk 绑定对不上 → 启动 SyntaxError)。
 {
-	const now = new Date(Date.now() + 8 * 3600_000); // UTC+8 北京时间
-	const pad = (n: number) => String(n).padStart(2, "0");
-	const stamp = `${String(now.getUTCFullYear()).slice(2)}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}`;
-	await fs.writeFile("dist/pwa-version.json", JSON.stringify({ build: stamp }));
-	console.log(`  构建版本戳: ${stamp} (北京时间)`);
+	await fs.writeFile("dist/pwa-version.json", JSON.stringify({ build: buildStamp }));
+
+	const swSource = await fs.readFile("apps/core/pwa-sw.js", "utf8");
+	if (!swSource.includes("__BUILD_STAMP__")) {
+		throw new Error("pwa-sw.js 里找不到 __BUILD_STAMP__ 占位符——戳没注入进去的话,SW 字节恒定,更新机制会静默失效");
+	}
+	await fs.writeFile("dist/pwa-sw.js", swSource.replaceAll("__BUILD_STAMP__", buildStamp));
+	console.log(`  构建版本戳: ${buildStamp} (北京时间,已写入 pwa-version.json 与 pwa-sw.js)`);
 }

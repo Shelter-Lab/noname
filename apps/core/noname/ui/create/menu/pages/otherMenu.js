@@ -126,17 +126,31 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 			updateCheckPx.style.whiteSpace = "nowrap";
 			updateCheckPx.style.marginTop = "8px";
 
-			// 版本戳:显示当前构建时间(YYYYMMDDHHmm),便于确认是否已更新到最新
+			// 版本戳:显示当前构建时间(YYMMDDHHmm),便于确认是否已更新到最新
 			var versionSpan = document.createElement("span");
 			versionSpan.style.cssText = "font-size:12px;color:#888;margin-left:8px;font-variant-numeric:tabular-nums;";
 			versionSpan.textContent = "";
-			function loadVersionStamp() {
-				fetch("./pwa-version.json", { cache: "no-cache" })
-					.then(function (r) { return r.ok ? r.json() : null; })
-					.then(function (data) {
-						if (data && data.build) versionSpan.textContent = "v" + data.build;
+			/** 当前页面正在跑的构建戳(第一次读到就记下,用来和线上比对) */
+			var runningStamp = null;
+			function loadVersionStamp(fromNetwork) {
+				// 默认走 SW/缓存那份 = "我现在跑的是哪一版";fromNetwork 时绕开缓存 = "线上最新是哪一版"
+				return fetch("./pwa-version.json", { cache: fromNetwork ? "reload" : "no-cache" })
+					.then(function (r) {
+						return r.ok ? r.json() : null;
 					})
-					.catch(function () {});
+					.then(function (data) {
+						if (data && data.build) {
+							if (!fromNetwork) {
+								runningStamp = data.build;
+								versionSpan.textContent = "v" + data.build;
+							}
+							return data.build;
+						}
+						return null;
+					})
+					.catch(function () {
+						return null;
+					});
 			}
 			loadVersionStamp();
 
@@ -150,24 +164,37 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 						alert("当前不是 PWA 安装环境,无法检查更新。");
 						return;
 					}
+					// 先直接问线上的构建戳(绕开缓存),它是"有没有新版"最可靠的判据。
+					// 【为什么不能只靠 reg.update()】update() 只在"发现新 SW 字节"时才产生
+					// installing/waiting;若新 SW 已经装好并 activate 完了,两者都是空,
+					// 旧代码就误报"已是最新版本"——而实际上页面里跑的还是旧代码,得刷新才生效。
+					var latest = await loadVersionStamp(true);
+
 					await reg.update();
-					// update() 后若发现新版,reg.installing/waiting 会出现新 SW
 					var incoming = reg.installing || reg.waiting;
 					if (incoming) {
-						alert("发现新版本,正在更新…\n更新完成后将自动刷新页面(离线缓存会保留)。");
+						alert("发现新版本,正在更新…\n更新完成后将自动刷新页面(已下载的离线素材会保留)。");
+						// 若已 waiting(装好没接管),催它跳过等待
+						if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
 						incoming.addEventListener("statechange", function () {
-							if (incoming.state === "installed" || incoming.state === "activated") {
-								// 新 SW 就绪 → 刷新页面用上新版。缓存桶不变则离线资源保留。
+							// 【只在 activated 才刷】installed 时新 SW 还没接管,这时刷新仍由旧 SW
+							// 响应 → 拿到的还是旧代码,白刷一次还让用户以为更新失败。
+							if (incoming.state === "activated") {
 								location.reload();
 							}
 						});
-						// 若已经是 waiting 状态(装好没接管),催它跳过等待
-						if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
-					} else {
-						// 已是最新:重新拉版本戳,确认显示的号码是当前真正在跑的
-						loadVersionStamp();
-						alert("已是最新版本。");
+						return;
 					}
+
+					// 没有 incoming,但线上戳和在跑的不一样 → 新 SW 已装好并接管,只是页面没刷新
+					if (latest && runningStamp && latest !== runningStamp) {
+						alert("已更新到 v" + latest + ",即将刷新页面生效。");
+						location.reload();
+						return;
+					}
+
+					loadVersionStamp();
+					alert("已是最新版本" + (latest ? "(v" + latest + ")" : "") + "。");
 				} catch (e) {
 					console.error("检查更新失败:", e);
 					alert("检查更新失败:" + (e && e.message ? e.message : e));

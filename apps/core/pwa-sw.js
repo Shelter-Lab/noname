@@ -8,7 +8,47 @@
 //
 // 海量动态文件(15000+)不适合预缓存清单,改为"访问即缓存":首次联网玩过的内容之后离线可复玩。
 
+// 构建戳:由 scripts/build.ts 在打包时把 __BUILD_STAMP__ 替换成 YYMMDDHHmm。
+// 【为什么必须写进 SW 文件本身】浏览器判断"有没有新 SW"只看 pwa-sw.js 的**字节**有没有变。
+// 以前这文件内容恒定,于是每次部署浏览器都认为 SW 没变 → reg.update() 找不到新版
+// → 「检查更新」永远弹"已是最新版本",用户没有任何主动更新手段。
+const BUILD = "__BUILD_STAMP__";
+
+// 桶名保持固定,**不带构建戳**:带戳等于每次部署换新桶,用户辛苦下的 1GB 立绘/语音
+// 全部作废重下,代价远大于收益。版本一致性用下面的"代码文件原子换版"解决。
 const CACHE = "noname-pwa-v2";
+
+// 缓存里记录"这批代码是哪个构建的"用的 key(不是真实资源,只存一个戳)
+const BUILD_KEY = "/__pwa_build__";
+// install 时没装成的文件清单。只有名列其中的代码文件才需要在 fetch 时走网络补齐——
+// 不能因为一个文件失败就让全部 622 个代码文件降级走网络(那才是真的拖慢启动)。
+const STALE_KEY = "/__pwa_stale__";
+
+// 本体代码文件:必须**整版原子一致**,不能逐文件更新。
+// 【为什么】产物文件名不带 hash(index4.js 永远叫 index4.js),而 vite 的 _virtual chunk
+// 编号会随依赖图变化漂移——同一个 index4.js,上一版可能是别的模块、导出别的字母,这一版
+// 是 crypto-js、导出 `c`。逐文件 SWR 更新必然让缓存里新旧混搭,而 ES 模块图是整体链接的,
+// 于是新 entry.js 向旧 index4.js 要 `{ c }` → 拿不到 →
+// "SyntaxError: importing binding name 'c' is not found",行列号 0
+// (module link 阶段的错,不属于任何一行)。重启越多混得越花,永远不会自愈。
+const CODE_EXT = /\.(js|mjs|ts|css|html|json|webmanifest)$/i;
+// 只认 install 会整版装齐的那批目录(= pwa-core-assets.json 的管辖范围)。
+// 【为什么要限定目录】/extension/ 下有 164 个内置扩展 js,它们在"可下载清单"里、
+// install 不会装 → BUILD_KEY 代表不了它们 → 若也判为代码,换版后每次启动都要重新
+// 联网取一遍(在线白费流量、离线更慢),而扩展是各自独立加载的,本就不存在跨 chunk
+// 绑定问题。核心目录清单与 scripts/build.ts 的 coreDirs 保持一致。
+// 【必须锚定在路径开头】用 includes 会误伤:/extension/3D精选/character/skill.js 里含
+// "/character/",一度让 131 个内置扩展 js 被判成本体代码。SW 挂在站点根,故一级目录
+// 就是 pathname 的第一段。
+const CODE_DIRS = ["noname", "_virtual", "node_modules", "layout", "theme", "game", "mode", "card", "character"];
+function isCodeAsset(pathname) {
+	if (!CODE_EXT.test(pathname)) return false;
+	const rel = pathname.replace(/^\/+/, "");
+	const slash = rel.indexOf("/");
+	// 根目录一层的散文件(noname.js、jit-test.ts、service-worker.js、index.html 等)也算
+	if (slash === -1) return true;
+	return CODE_DIRS.includes(rel.slice(0, slash));
+}
 
 // 这些运行期动态接口即使残留也绝不缓存(纯静态部署下不存在,双保险)
 const BYPASS = ["/checkFile", "/checkDir", "/readFile", "/readFileAsText", "/writeFile", "/removeFile", "/getFileList", "/createDir", "/removeDir"];
@@ -78,10 +118,15 @@ async function sanitizeResponse(resp) {
 }
 
 self.addEventListener("install", event => {
-	// install 阶段预缓存"启动+标准对局必需"的核心文件(约 32MB,清单由构建生成)。
+	// install 阶段预缓存"启动+标准对局必需"的核心文件(约 33MB,清单由构建生成)。
 	// 保证断网时也能稳定启动、进模式、玩标准局。失败不阻塞安装(降级为访问即缓存)。
 	// 注:保持简单快速——曾加"重试3轮+对账709项"导致 install 变慢/在 Safari 上迟迟装不上,
 	//     反而让离线失败(回归),故回退到简单版。预缓存完整性靠 fetch 事件的访问即缓存兜底。
+	//
+	// 【本次新增:代码整版换新】SW 文件带构建戳后,每次部署浏览器都会走一遍 install。
+	// 这里就是换版的唯一时机:把整份核心清单用 cache:"reload" 全量重下,一次装齐同一构建的
+	// 全部代码文件,从根上排除跨版本 chunk 混搭(见文件头 isCodeAsset 处的说明)。
+	// 素材(立绘/语音)不在核心清单里,一个都不会被碰,用户下过的 1GB 完整保留。
 	event.waitUntil(
 		(async () => {
 			try {
@@ -91,19 +136,74 @@ self.addEventListener("install", event => {
 				const cache = await caches.open(CACHE);
 				// 分批下载,避免一次性数百请求压垮 iOS;单批失败不影响其余。
 				// 用 fetch+sanitize 而非 cache.add,以便洗白重定向响应(iOS 不接受 redirected 缓存)。
+				// cache:"reload" 绕开浏览器 HTTP 缓存,确保拿到的是当前构建的真实内容而不是
+				// 上一版的副本——否则换版会换成旧字节,等于没换。
 				const BATCH = 50;
+				let ok = 0;
+				/** 没装成的代码文件:只有这些需要在 fetch 时走网络补齐 */
+				const missed = [];
 				for (let i = 0; i < list.length; i += BATCH) {
 					const batch = list.slice(i, i + BATCH);
-					await Promise.allSettled(
+					const rs = await Promise.allSettled(
 						batch.map(async url => {
-							const r = await fetch(url, { cache: "no-cache" });
-							if (r && r.status === 200) await cache.put(url, await sanitizeResponse(r));
+							const r = await fetch(url, { cache: "reload" });
+							if (r && r.status === 200) {
+								await cache.put(url, await sanitizeResponse(r));
+								return true;
+							}
+							throw new Error("预缓存失败 " + url);
 						})
 					);
+					rs.forEach((r, k) => {
+						if (r.status === "fulfilled") ok++;
+						else missed.push(batch[k]);
+					});
 				}
+				// 【重试一轮没装成的】网络抖一下就让几百个文件永久走 Network-First 太亏,
+				// 而失败往往是瞬时的。只重试缺的那几个,代价极小、成功率很高。
+				if (missed.length) {
+					console.warn(`[pwa-sw] 预缓存缺 ${missed.length} 个,重试一轮`);
+					const retry = await Promise.allSettled(
+						missed.map(async url => {
+							const r = await fetch(url, { cache: "reload" });
+							if (r && r.status === 200) {
+								await cache.put(url, await sanitizeResponse(r));
+								return url;
+							}
+							throw new Error("重试仍失败 " + url);
+						})
+					);
+					const fixed = new Set(retry.filter(r => r.status === "fulfilled").map(r => r.value));
+					ok += fixed.size;
+					for (let i = missed.length - 1; i >= 0; i--) {
+						if (fixed.has(missed[i])) missed.splice(i, 1);
+					}
+				}
+				// 装齐了 → 记下构建戳,fetch 分支对代码文件走原来的 SWR(启动速度完全不变)。
+				// 没装齐 → 只把「缺的那几个」记进 STALE_KEY,而不是让全部 622 个代码文件都走
+				// 网络。这样最坏情况的代价正比于真实缺失量,不会因为一个文件失败就整体降级。
+				await cache.put(BUILD_KEY, new Response(BUILD, { headers: { "Content-Type": "text/plain" } }));
+				if (missed.length) {
+					await cache.put(STALE_KEY, new Response(JSON.stringify(missed), { headers: { "Content-Type": "application/json" } }));
+					console.warn(`[pwa-sw] 核心预缓存 ${ok}/${list.length},仍缺 ${missed.length} 个,这些将走 Network-First`);
+				} else {
+					await cache.delete(STALE_KEY);
+					console.log(`[pwa-sw] 核心已整版就绪 build=${BUILD}(${ok}/${list.length})`);
+				}
+				// 【必须失效内存缓存】getCodeState 只查一次 Cache Storage。install 期间若已有
+				// fetch 事件问过它(那时还没写 BUILD_KEY),内存里就存着 fresh:false,之后整个
+				// SW 生命周期都会让代码文件走网络——白白拖慢启动。这里装完立刻清掉重算。
+				codeStatePromise = null;
 			} catch (e) {
-				// 预缓存失败不致命:后续靠 fetch 事件的访问即缓存兜底
+				// 清单都没拿到(离线/CDN 抽风)→ 这一版一个文件都没换成。
+				// 必须清掉构建戳,让代码文件全部走 Network-First:此时缓存里极可能是上一版的
+				// 混搭状态,宁可慢也不能白屏。装齐的那次 install 会把戳补回来。
 				console.warn("[pwa-sw] 核心预缓存未完成:", e);
+				await caches
+					.open(CACHE)
+					.then(c => Promise.all([c.delete(BUILD_KEY), c.delete(STALE_KEY)]))
+					.catch(() => {});
+				codeStatePromise = null;
 			}
 			await self.skipWaiting();
 		})()
@@ -127,6 +227,39 @@ self.addEventListener("activate", event => {
 		})()
 	);
 });
+
+// 读一次缓存状态:这批代码是哪个构建的、哪些文件没装成。
+// 结果缓存在内存里(只查一次 Cache Storage),避免几百个请求各查一遍拖慢启动。
+// 返回 { fresh, stale:Set } —— fresh 为 false 时全部代码文件走网络;
+// fresh 为 true 时只有 stale 里点名的那几个走网络,其余照旧 SWR(启动速度不变)。
+let codeStatePromise = null;
+function getCodeState() {
+	if (!codeStatePromise) {
+		codeStatePromise = (async () => {
+			try {
+				const cache = await caches.open(CACHE);
+				const rec = await cache.match(BUILD_KEY);
+				if (!rec || (await rec.text()) !== BUILD) return { fresh: false, stale: null };
+				const staleRec = await cache.match(STALE_KEY);
+				if (!staleRec) return { fresh: true, stale: null };
+				// 清单里存的是 "./noname/x.js",统一转成 pathname 比对
+				const list = await staleRec.json();
+				return { fresh: true, stale: new Set(list.map(p => new URL(p, self.location.href).pathname)) };
+			} catch {
+				return { fresh: false, stale: null };
+			}
+		})();
+	}
+	return codeStatePromise;
+}
+
+/** 这个代码文件需要绕开缓存去拿吗? */
+async function codeNeedsFreshFetch(pathname) {
+	const st = await getCodeState();
+	if (!st.fresh) return true; // 整批代码来路不明 → 全部走网络
+	if (!st.stale) return false; // 装齐了 → 一个都不用走
+	return st.stale.has(pathname); // 只补 install 时真没装成的那几个
+}
 
 self.addEventListener("fetch", event => {
 	const req = event.request;
@@ -224,6 +357,31 @@ self.addEventListener("fetch", event => {
 		(async () => {
 			const cache = await caches.open(CACHE);
 			const cached = await cache.match(req);
+
+			// 代码文件且缓存不是当前构建的 → 缓存里可能是跨版本混搭的 chunk,不能信。
+			// 走 Network-First 现取现用(取到就写回),只有网络失败才退回旧缓存。
+			// 【为什么不能像素材那样 SWR】SWR 会先把旧 chunk 返给页面,等模块图链接时才发现
+			// 新旧绑定对不上,直接 SyntaxError 白屏——那时候后台更新到没到都救不了这一次启动。
+			// 【为什么这不会拖慢正常启动】install 装齐后 BUILD_KEY 与 BUILD 相符,这个分支
+			// 整个跳过,和以前完全一样;只有"刚换版且预缓存没装齐"这种少见情况才多花网络。
+			// 【豁免下载器】下载器的请求带 cache:"no-cache",它只是在批量填缓存、不执行模块,
+			// 不存在跨版本绑定问题;而这里的超时会掐断慢网下的批量补课(missTimeoutMs 特意
+			// 对它返回 0 就是为了不超时),必须放它走原路。
+			const codeNeedsNetwork = req.cache !== "no-cache" && isCodeAsset(url.pathname) && !looksOffline() && (await codeNeedsFreshFetch(url.pathname));
+			if (codeNeedsNetwork) {
+				try {
+					const resp = await fetchSafe(req, undefined, missTimeoutMs(req));
+					noteNetResult(true);
+					if (resp && resp.status === 200) {
+						cache.put(req, await sanitizeResponse(resp.clone()));
+						return await sanitizeResponse(resp);
+					}
+				} catch {
+					noteNetResult(false);
+				}
+				// 网络没拿到:有旧缓存也只能先用(离线可玩优先),没有则往下走未命中逻辑
+				if (cached) return await sanitizeResponse(cached);
+			}
 
 			if (cached) {
 				// 命中缓存:立即返回(离线可玩),后台静默更新。
