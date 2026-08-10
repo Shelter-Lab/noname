@@ -382,15 +382,31 @@
 				}, 20000);
 			}
 
-			// 包一层既有的 onerror,不改它的逻辑:命中就接手修复,不命中原样交回去(照旧 alert)。
-			var prev = window.onerror;
-			window.onerror = function (msg, src, line, column, err) {
-				if (!alreadyTried && !running && looksMixed(msg)) {
-					window.__pwaRepair();
-					return true;
-				}
-				return typeof prev === "function" ? prev.apply(this, arguments) : void 0;
-			};
+			// 【触发点必须用 addEventListener,不能包 window.onerror】
+			// noname 启动到一半会在 noname/util/error.ts 的 setOnError() 里把 window.onerror 和
+			// window.onunhandledrejection **整个重新赋值**,属性式的包装会被直接冲掉。事件监听器不受
+			// 赋值影响,且按注册顺序先跑(本文件在最前面注册,所以总是第一个拿到)。
+			//   · 启动期模块图 link 失败:走 error 事件。那会儿 boot 一行都没跑到、setOnError 也没执行,
+			//     两种写法都能接住 —— 这是"整台白屏"那类故障,主路径。
+			//   · 启动成功后动态 import 的 chunk 混搭(sdp.js/sdp2.js/index4.js 等 6 个只在用到时才加载):
+			//     失败形态是 **unhandledrejection**,而此时 error.ts 已接管属性处理器 ——
+			//     只包 onerror 就永远收不到,那 6 个坏了只能手动跑 __pwaRepair()。故两种事件都监听。
+			// stopImmediatePropagation:自修复已经接手并全屏显示进度了,别让 error.ts 再弹一个技术报错框
+			// 盖在上面。不命中的错误一律不碰,原有 alert 照旧。
+			function onMixed(e, msg) {
+				if (alreadyTried || running || !looksMixed(msg)) return;
+				if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+				if (typeof e.preventDefault === "function") e.preventDefault();
+				window.__pwaRepair();
+			}
+			// 不带 capture:资源加载失败(图片/音频 404)不冒泡到 window,收不到 → 不会误触发重灌
+			window.addEventListener("error", function (e) {
+				onMixed(e, e && e.message);
+			});
+			window.addEventListener("unhandledrejection", function (e) {
+				var r = e && e.reason;
+				onMixed(e, r && r.message ? r.message : r);
+			});
 		})();
 	</script>
 	<script type="module" src="./noname/entry.ts"></script>
