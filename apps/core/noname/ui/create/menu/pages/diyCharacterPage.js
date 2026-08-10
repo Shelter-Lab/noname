@@ -9,6 +9,44 @@ import { ui, lib, get } from "noname";
 import { loadDiyList, loadDiyImage, saveDiyCharacter, deleteDiyCharacter, injectDiyCharacter, exportDiyCharacters, importDiyCharacters, isPackEnabled } from "@/util/diyCharacter.js";
 
 /**
+ * 展开式详细说明。
+ * 每条效果都对着实现核对过（别照字面猜），行末括号里是依据的位置，方便以后本体改了来复查。
+ */
+const HELP_HTML = `
+<b>这是什么</b><br>
+拿游戏里现成的技能拼一个自己的武将。只存数据、不存代码，所以重启不丢、不用联网，
+也不会像「制作扩展」那样在网页版重开就失效（那条路要去服务器上取一个并不存在的
+extension.js）。代价是<b>只能用已有技能，写不了新技能</b>。<br><br>
+
+<b>各字段</b><br>
+· <b>姓名</b>：内部 id，建议英文/拼音。同名会顶掉已有武将，所以撞名时不给存。<br>
+· <b>显示</b>：选将界面上的名字，留空就拿姓名顶上。想改名字改这里，不用动姓名。<br>
+· <b>介绍</b>：长按/点武将牌看到的那段说明，选填。<br>
+· <b>体力</b>：留空按 4。可以写「体力/上限/护甲」，例如 <b>3/4</b> 是 3 血 4 上限、
+<b>4/4/1</b> 再带 1 点护甲。填 <b>无限</b> 或 <b>∞</b> 就是无限血。<br>
+· <b>技能</b>：先在左边挑一个现成武将，右边就列出它的技能（含衍生技），点「添加」加进来。
+加错了点技能标签本身即可移除。技能可以跨武将随便混。<br>
+· <b>头像</b>：不选也能存，只是会显示成剪影。选了会等比裁进武将牌。<br><br>
+
+<b>四个标记</b>（都不勾就是一个普通武将，正常显示、AI 也会用）<br>
+· <b>主公</b>：身份局里可以被抽成主公。不勾则永远只当忠/反/内。<br>
+· <b>BOSS</b>：归到 BOSS 类，同时进 AI 禁用名单——<b>AI 不会再用它</b>，你自己点将仍可用；
+挑战模式的 BOSS 列表里会出现它。注意这个标记<b>不改血量</b>，想要厚血自己在体力里填。<br>
+· <b>仅点将</b>：AI 不选它，只能手动点将。和 BOSS 的区别是不影响分类，只管 AI 那一条。<br>
+· <b>隐匿技</b>：整张牌暗置——<b>不只藏技能，武将名和立绘一起变成「暗置」</b>，
+发动技能才翻开，且选将时不能再选势力。<b>想让技能正常显示就别勾这个。</b><br><br>
+
+<b>存到哪、会不会丢</b><br>
+存在浏览器本机（IndexedDB），跟着这个域名走。清浏览器数据/换设备/换浏览器都会丢，
+所以捏好了建议点「导出」存一份 json，到新设备「导入」即可，头像也一起带过去。<br><br>
+
+<b>什么时候不生效</b><br>
+· <b>联机模式不生效</b>：别人机器上没有你这个武将，同步不了。<br>
+· 「武将」tab 里的<b>自建武将</b>开关关掉后，武将还在、但选将界面看不到，开回来即恢复。<br>
+· 挑的技能所属的<b>武将包被禁用</b>时，那条技能会被跳过（控制台里有提示），武将本身照常能用。
+`;
+
+/**
  * @param {HTMLDivElement} page 面板容器，由 exetensionMenu 建好传进来
  */
 export function createDiyCharacterPage(page) {
@@ -59,8 +97,12 @@ export function createDiyCharacterPage(page) {
 	avatar.appendChild(imageInput);
 	ui.create.div(".select_avatar", "选择头像", avatar);
 
+	// 姓名/显示拆两个框:本体「制作扩展」是塞进一个框用竖线分隔(exetensionMenu.js:689 的
+	// `id + "|" + translate`),不知道这个隐规则的人只敲中文,id 就成了中文。拆开显式化。
+	// 中文 id 本身能跑(索引不挑字符),只是配音/立绘按 id 拼 URL 时要 encode、跨机器交换存档易撞车。
 	ui.create.div(".indent", '姓名：<input class="diy_name" type="text" placeholder="英文id">', form);
 	ui.create.div(".indent", '显示：<input class="diy_translate" type="text" placeholder="中文名">', form);
+	ui.create.div(".indent", '介绍：<input class="diy_des" type="text" placeholder="选填">', form);
 	ui.create.div(".indent", '体力：<input class="diy_hp" type="text" placeholder="体/限/甲">', form);
 	var sexes = ui.create.selectlist(
 		[
@@ -77,13 +119,16 @@ export function createDiyCharacterPage(page) {
 
 	var nameInput = form.querySelector("input.diy_name");
 	var translateInput = form.querySelector("input.diy_translate");
+	var desInput = form.querySelector("input.diy_des");
 	var hpInput = form.querySelector("input.diy_hp");
 
 	// —— 技能挑选：先选一个现有武将，再从它的技能里挑 ——
 	// 放到 form 外面的全宽段：.new_character > .indent 有 123px 左缩进（给头像让位），
 	// 塞两个 select + 按钮在手机上宽度不够。
 	var wide = ui.create.div(page);
-	block(wide, "padding:2px 12px 0 12px;text-align:left;");
+	// 左右各留 8 而不是 12：390 宽手机上这段只有 230px 可用，标记那一行要 235px，
+	// 差这 8px 就得折行，折行又把「保存武将」顶出 262 高的首屏。
+	block(wide, "padding:2px 8px 0 8px;text-align:left;");
 
 	var skillRow = ui.create.div("", "技能：", wide);
 	block(skillRow, "padding-top:2px;white-space:nowrap;");
@@ -168,6 +213,42 @@ export function createDiyCharacterPage(page) {
 			.filter(Boolean);
 	};
 
+	// —— 四个标记 ——
+	// 字段名照本体 exetensionMenu.js:745 那张 optionMap,存的是 Character 的一等属性,
+	// 不用改存储结构。各自的真实效果(都已核对实现,别照字面猜):
+	//   主公 isZhugong      —— 身份局可被选为主公
+	//   BOSS isBoss         —— 归入 boss 分类,且进 AI 禁用名单(loading.ts:312),与血量无关
+	//   仅点将 isAiForbidden —— AI 不选它,只能手动点将
+	//   隐匿技 hasHiddenSkill —— 藏的不只技能:武将名与立绘一起变 "unknown" 整张暗置
+	//                           (player.js:3525 会清空 skills 并置 name="unknown"),发动才翻开;
+	//                           且选将时不给选势力(get/index.js:6440)。不勾就是正常显示。
+	// 注意参数顺序：ui.create.div 把**第一个**字符串当 className、第二个才当 innerHTML
+	// （ui/create/index.js:581），少给一个空串会让这段 HTML 变成类名、checkbox 一个都建不出来
+	//
+	// 这一行**不能**整行 nowrap：390 宽手机上这里只有 230px，nowrap 放不下就直接切字
+	// （原来四项占 244px，只靠外层 12px padding 兜着，只剩 6px 余量）。
+	// 改成整行允许折行、每项自己 inline-block + nowrap：项内不断字，放不下就整项换行。
+	// 间距压到 5px 且最后一项不留右边距，实测 227px < 230 —— 390 宽下仍是一行
+	// （不换行才不会把「保存武将」顶出 262 高的首屏），更窄的屏才折行。
+	var optionSpan = 'style="display:inline-block;white-space:nowrap;margin-right:5px"';
+	var lastSpan = 'style="display:inline-block;white-space:nowrap"';
+	var optionRow = ui.create.div("", `<span ${optionSpan}>主公<input type="checkbox" name="isZhugong"></span><span ${optionSpan}>BOSS<input type="checkbox" name="isBoss"></span><span ${optionSpan}>仅点将<input type="checkbox" name="isAiForbidden"></span><span ${lastSpan}>隐匿技<input type="checkbox" name="hasHiddenSkill"></span>`, wide);
+	block(optionRow, "padding-top:6px;font-size:14px;");
+
+	var OPTION_KEYS = ["isZhugong", "isBoss", "isAiForbidden", "hasHiddenSkill"];
+	var optionBox = function (key) {
+		return optionRow.querySelector('input[name="' + key + '"]');
+	};
+	var getOptions = function () {
+		var picked = {};
+		for (const key of OPTION_KEYS) {
+			if (optionBox(key)?.checked) {
+				picked[key] = true;
+			}
+		}
+		return picked;
+	};
+
 	// —— 保存 / 取消 ——
 	var buttonRow = ui.create.div(wide);
 	block(buttonRow, "padding-top:8px;");
@@ -207,10 +288,17 @@ export function createDiyCharacterPage(page) {
 		pickedImage = null;
 		nameInput.value = "";
 		translateInput.value = "";
+		desInput.value = "";
 		hpInput.value = "";
 		sexes.value = "male";
 		groups.value = grouplist[0]?.[0] || "wei";
 		pickedSkills.innerHTML = "";
+		for (const key of OPTION_KEYS) {
+			var box = optionBox(key);
+			if (box) {
+				box.checked = false;
+			}
+		}
 		avatar.style.backgroundImage = "";
 		avatar.classList.remove("inited");
 		saveButton.innerHTML = "保存武将";
@@ -234,14 +322,18 @@ export function createDiyCharacterPage(page) {
 				await deleteDiyCharacter(editingName);
 			}
 			await saveDiyCharacter(
-				{
-					name: name,
-					translate: translateInput.value.trim() || name,
-					sex: sexes.value,
-					group: groups.value,
-					hp: hpInput.value.trim() || "4",
-					skills: skills,
-				},
+				Object.assign(
+					{
+						name: name,
+						translate: translateInput.value.trim() || name,
+						des: desInput.value.trim(),
+						sex: sexes.value,
+						group: groups.value,
+						hp: hpInput.value.trim() || "4",
+						skills: skills,
+					},
+					getOptions()
+				),
 				pickedImage
 			);
 			await injectOne(name);
@@ -288,9 +380,16 @@ export function createDiyCharacterPage(page) {
 		pickedImage = null;
 		nameInput.value = record.name;
 		translateInput.value = record.translate || "";
+		desInput.value = record.des || "";
 		hpInput.value = record.hp || "";
 		sexes.value = record.sex || "male";
 		groups.value = record.group || grouplist[0]?.[0];
+		for (const key of OPTION_KEYS) {
+			var box = optionBox(key);
+			if (box) {
+				box.checked = Boolean(record[key]);
+			}
+		}
 		pickedSkills.innerHTML = "";
 		for (const skill of record.skills || []) {
 			var tag = document.createElement("button");
@@ -415,11 +514,25 @@ export function createDiyCharacterPage(page) {
 	block(characterList, "padding:0 12px;text-align:left;");
 	refreshList();
 
-	// —— 说明脚注 ——
-	// 放最后：可视区只有 262 高，说明放头部会把「保存」按钮顶出首屏
+	// —— 说明 ——
+	// 放最后：可视区只有 262 高，说明放头部会把「保存」按钮顶出首屏。
+	// 详细说明默认收起：摊开有三四十行，一直占着会把「已创建」列表推得离表单很远。
+	var helpLine = ui.create.div(".menu-help", page);
+	helpLine.innerHTML = '用现成技能捏武将，只存数据不存代码，重启不丢，不用联网。<span style="opacity:0.7">联机模式不生效。</span> ';
+	block(helpLine, "padding:2px 12px 4px 12px;font-size:13px;line-height:18px;opacity:0.55;text-align:left;");
+	var helpToggle = document.createElement("button");
+	helpToggle.innerHTML = "详细说明";
+	helpLine.appendChild(helpToggle);
+
 	var help = ui.create.div(".menu-help", page);
-	help.innerHTML = '用现成技能捏武将，只存数据不存代码，重启不丢（「制作扩展」在网页版重启即失效）。<span style="opacity:0.7">联机模式不生效。</span>';
-	block(help, "padding:2px 12px 10px 12px;font-size:13px;line-height:18px;opacity:0.55;text-align:left;");
+	help.innerHTML = HELP_HTML;
+	block(help, "padding:0 12px 10px 12px;font-size:13px;line-height:19px;opacity:0.6;text-align:left;");
+	help.style.display = "none";
+	helpToggle.onclick = function () {
+		var open = help.style.display === "none";
+		help.style.display = open ? "block" : "none";
+		helpToggle.innerHTML = open ? "收起说明" : "详细说明";
+	};
 
 	// 【不要在这里调 lib.setScroll(page)】面板本身永远不是滚动容器（.menu-buttons 没有 overflow，
 	// 高度随内容长，scrollHeight 恒等于 offsetHeight），真正滚的是外面的 .right.pane

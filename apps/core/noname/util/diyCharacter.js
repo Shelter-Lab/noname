@@ -34,8 +34,15 @@ const PACK_NAME_INITED = "pwa_diy_pack_inited";
  * @property {string} hp 体力，沿用本体 "体/限/甲" 写法，交给 get.infoHp 解析
  * @property {string[]} skills 技能 id 列表，必须都是 lib.skill 里已存在的
  * @property {string} [des] 一句话介绍
+ * @property {boolean} [isZhugong] 主公：身份局可被选为主公
+ * @property {boolean} [isBoss] BOSS：归入 boss 分类，且进 AI 禁用名单（与血量无关）
+ * @property {boolean} [isAiForbidden] 仅点将可用：AI 不选它
+ * @property {boolean} [hasHiddenSkill] 隐匿技：武将名/立绘/技能整张暗置，发动才翻开
  * @property {number} [createTime] 创建时间戳
  */
+
+/** 四个标记：Character 的一等布尔属性，字段名照本体 exetensionMenu.js:745 的 optionMap */
+const FLAG_KEYS = ["isZhugong", "isBoss", "isAiForbidden", "hasHiddenSkill"];
 
 /**
  * 读全部 DIY 武将定义（只读 JSON，不含立绘）
@@ -169,14 +176,29 @@ export function normalizeHp(hp) {
  */
 function toCharacter(record, image) {
 	const hp = normalizeHp(record.hp);
-	const character = get.convertedCharacter({
+	/** @type {Record<string, any>} */
+	const data = {
 		sex: record.sex,
 		group: record.group,
 		hp: get.infoHp(hp),
 		maxHp: get.infoMaxHp(hp),
 		hujia: get.infoHujia(hp),
 		skills: (record.skills || []).slice(),
-	});
+	};
+	// 四个标记直接进 data：Character 构造器对 object 入参是 Object.assign(this, data)
+	// （character.js:201），类字段已把这些属性默认成 false，塞进去即生效
+	for (const key of FLAG_KEYS) {
+		if (record[key]) {
+			data[key] = true;
+		}
+	}
+	// isBoss 单独多带一个 isBossAllowed：本体 exetensionMenu.js:1239 也是成对给的。
+	// isBoss 只做「归类为 boss + 不给 AI 用」，真正让 boss 模式把它列进可选 BOSS 的是
+	// isBossAllowed（extension/boss/extension.js:137 按这个字段筛）。少给就是勾了没反应。
+	if (data.isBoss) {
+		data.isBossAllowed = true;
+	}
+	const character = get.convertedCharacter(data);
 	// img 是 Character 的一等字段，get.skinPath:7553 与 polyfill.ts:207 都优先读它
 	if (image) {
 		character.img = image;
@@ -244,6 +266,14 @@ export async function injectDiyCharacter(record) {
 	lib.character[record.name] = character;
 	lib.characterPack[PACK_NAME][record.name] = character;
 	lib.translate[record.name] = record.translate || record.name;
+	// BOSS 还要进 AI 禁用名单：光有 isBoss 字段拦不住 AI —— characterDisabled
+	// （library/index.js:11199）只看 forbidai 名单和 isAiForbidden。本体所有装载路径都补了
+	// 这一步（loading.ts:312、game/index.js:6155），自建包也照办。
+	// forbidai 不持久化（game/config.json 给默认值，运行期 add 不 saveConfig），每次启动重新注入即可。
+	// 取消勾选后要同步摘掉：本次会话里这个名字已经在名单上了，只加不减会让"取消 BOSS"当场不生效。
+	if (Array.isArray(lib.config.forbidai)) {
+		lib.config.forbidai[character.isBoss ? "add" : "remove"](record.name);
+	}
 	for (const skill of skills) {
 		lib.skilllist.add(skill);
 	}
