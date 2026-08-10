@@ -126,5 +126,16 @@ console.log("生成 PWA 资源清单");
 		throw new Error("pwa-sw.js 里找不到 __BUILD_STAMP__ 占位符——戳没注入进去的话,SW 字节恒定,更新机制会静默失效");
 	}
 	await fs.writeFile("dist/pwa-sw.js", swSource.replaceAll("__BUILD_STAMP__", buildStamp));
-	console.log(`  构建版本戳: ${buildStamp} (北京时间,已写入 pwa-version.json 与 pwa-sw.js)`);
+
+	// index.html 里也埋一份:window.__PWA_RUNNING_BUILD__ = "页面正在跑的构建"。
+	// 【为什么不能只有 pwa-version.json】那个文件读到的是缓存里哪一版,不是页面内存里跑的哪一版
+	// —— 新 SW 装好后两者就分叉了,「检查更新」按钮拿它比对必然误报"已是最新"(详见 index.html 处注释)。
+	const htmlPath = "dist/index.html";
+	const html = await fs.readFile(htmlPath, "utf8");
+	if (!html.includes("__PWA_BUILD_STAMP__")) {
+		throw new Error("dist/index.html 里找不到 __PWA_BUILD_STAMP__ 占位符——戳没注入的话,「检查更新」按钮无法判断页面在跑哪一版,会一直误报「已是最新」");
+	}
+	await fs.writeFile(htmlPath, html.replaceAll("__PWA_BUILD_STAMP__", buildStamp));
+
+	console.log(`  构建版本戳: ${buildStamp} (北京时间,已写入 pwa-version.json、pwa-sw.js 与 index.html)`);
 }

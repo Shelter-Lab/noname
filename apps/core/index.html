@@ -75,6 +75,17 @@
 	<link rel="apple-touch-icon" href="./image/pwa/apple-touch-icon.png" />
 	<link rel="icon" type="image/png" href="./image/pwa/icon-192.png" />
 	<script>
+		// 【页面正在跑的是哪一版】由 scripts/build.ts 打包时把 __PWA_BUILD_STAMP__ 换成 YYMMDDHHmm。
+		// 「检查更新」按钮拿它和线上的戳比对,判断"要不要刷新"。
+		// 【为什么不能让按钮去 fetch pwa-version.json 代替】那读到的是**缓存里**哪一版,不是
+		// **我在跑**哪一版 —— 新 SW 一装好缓存就是新戳了,而页面内存里跑的还是旧代码,
+		// 于是按钮永远报"已是最新",用户不知道该刷新,这个按钮就等于没用。
+		// 写死在这里就不会撒谎:index.html 与 js 同属 install 阶段整版换新的那一批
+		// (pwa-sw.js 的 isCodeAsset 对根目录散文件返回 true),故这个数字必与页面跑的 js 同版。
+		// dev server 下占位符不会被替换,按钮那边按"未知"处理。
+		window.__PWA_RUNNING_BUILD__ = "__PWA_BUILD_STAMP__";
+	</script>
+	<script>
 		// 注册 PWA Service Worker(离线缓存)。失败不影响游戏运行。
 		if ("serviceWorker" in navigator) {
 			window.addEventListener("load", async () => {

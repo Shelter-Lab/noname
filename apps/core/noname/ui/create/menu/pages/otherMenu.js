@@ -126,34 +126,49 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 			updateCheckPx.style.whiteSpace = "nowrap";
 			updateCheckPx.style.marginTop = "8px";
 
-			// 版本戳:显示当前构建时间(YYMMDDHHmm),便于确认是否已更新到最新
+			// 版本戳:显示当前页面正在跑的构建时间(YYMMDDHHmm),便于确认是否已更新到最新
 			var versionSpan = document.createElement("span");
 			versionSpan.style.cssText = "font-size:12px;color:#888;margin-left:8px;font-variant-numeric:tabular-nums;";
-			versionSpan.textContent = "";
-			/** 当前页面正在跑的构建戳(第一次读到就记下,用来和线上比对) */
-			var runningStamp = null;
-			function loadVersionStamp(fromNetwork) {
-				// 默认走 SW/缓存那份 = "我现在跑的是哪一版";fromNetwork 时绕开缓存 = "线上最新是哪一版"
-				return fetch("./pwa-version.json", { cache: fromNetwork ? "reload" : "no-cache" })
+			/**
+			 * 当前页面正在跑的构建戳。由 scripts/build.ts 打包时写死进 index.html。
+			 * 【为什么不去 fetch pwa-version.json 拿】那读到的是**缓存里**哪一版,不是**我在跑**哪一版:
+			 * 新 SW 一装好缓存就换成新戳了,而页面内存里跑的还是旧代码 —— 拿它比对必然误报"已是最新",
+			 * 用户不知道该刷新,这个按钮等于没用(这就是原来的老 bug)。
+			 * dev server 下占位符原样保留,此时判定为未知,只做"有没有新版"以外的降级处理。
+			 */
+			var runningStamp = /^\d{10}$/.test(String(window.__PWA_RUNNING_BUILD__ || "")) ? window.__PWA_RUNNING_BUILD__ : null;
+			versionSpan.textContent = runningStamp ? "v" + runningStamp : "";
+			/**
+			 * 问线上最新构建戳是多少(绕开一切缓存)。
+			 * 【必须自带超时】平时这个请求被 SW 拦下(SW 里 fetchSafe 有 2s 超时),但 SW 正在换版、
+			 * 或页面还没被接管的那一刻,它直接走网络 —— 弱网下"连上了但不返回"会永久挂住,
+			 * 按钮的 finally 就永远不执行,一直停在「检查中…」(用户实际遇到的症状)。
+			 * @returns {Promise<string|null>} null = 没问到(离线/超时/响应异常)
+			 */
+			function fetchLatestStamp() {
+				var controller = new AbortController();
+				var timer = setTimeout(function () {
+					controller.abort();
+				}, 8000);
+				return fetch("./pwa-version.json", { cache: "reload", signal: controller.signal })
 					.then(function (r) {
 						return r.ok ? r.json() : null;
 					})
 					.then(function (data) {
-						if (data && data.build) {
-							if (!fromNetwork) {
-								runningStamp = data.build;
-								versionSpan.textContent = "v" + data.build;
-							}
-							return data.build;
-						}
-						return null;
+						return data && data.build ? data.build : null;
 					})
 					.catch(function () {
 						return null;
+					})
+					.finally(function () {
+						clearTimeout(timer);
 					});
 			}
-			loadVersionStamp();
 
+			// 【这个按钮不负责"下载"新版】新版由 index.html 每次 load 时无条件 register("./pwa-sw.js")
+			// 自动装(SW 字节变了就 install → skipWaiting → clients.claim)。但那一次装完**不会**动
+			// 已经加载进内存跑起来的旧 js,所以本次打开仍是旧版,要下次打开才生效。
+			// 本按钮的价值就两条:①告诉你在跑哪一版、线上是哪一版;②发现有新版时让你一键刷新立刻生效。
 			var checkUpdateBtn = ui.create.node("button", "检查更新", async function () {
 				var btn = this;
 				btn.textContent = "检查中…";
@@ -166,35 +181,70 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					}
 					// 先直接问线上的构建戳(绕开缓存),它是"有没有新版"最可靠的判据。
 					// 【为什么不能只靠 reg.update()】update() 只在"发现新 SW 字节"时才产生
-					// installing/waiting;若新 SW 已经装好并 activate 完了,两者都是空,
-					// 旧代码就误报"已是最新版本"——而实际上页面里跑的还是旧代码,得刷新才生效。
-					var latest = await loadVersionStamp(true);
+					// installing/waiting;而 pwa-sw.js 的 install 末尾就 skipWaiting、activate 里
+					// clients.claim —— 用户点进菜单时新版早已 activate 完,两者都是空,
+					// 光看它就会误报"已是最新版本",而页面里跑的还是旧代码。
+					var latest = await fetchLatestStamp();
 
-					await reg.update();
+					// 【也要封顶】实测 update() 不等 install 跑完(Chromium 219ms / WebKit 15ms,
+					// 连 sw.js 请求被永久挂住时也只 3ms 就返回),所以它不是卡住的元凶;但它是这个
+					// 处理函数里最后一个无上限的 await —— 封个顶,「检查中…」就在任何情况下都不会永久停住。
+					// 超时也无妨:下面只是读一眼 installing/waiting,读不到就走构建戳比对那条路(更准)。
+					await Promise.race([reg.update().catch(function () {}), new Promise(function (res) { setTimeout(res, 8000); })]);
+
 					var incoming = reg.installing || reg.waiting;
 					if (incoming) {
-						alert("发现新版本,正在更新…\n更新完成后将自动刷新页面(已下载的离线素材会保留)。");
-						// 若已 waiting(装好没接管),催它跳过等待
-						if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+						// 【罕见但要接住】点按钮的瞬间新版恰好还在装(慢网下 install 要重下几百个核心文件)。
+						// 【监听必须挂在弹窗之前】弹窗阻塞主线程,而 SW 在另一线程继续装完并自行 activate;
+						// 等用户点掉弹窗时 state 早已是 activated,statechange 永不触发
+						// → 承诺的"自动刷新"静默失效(原来的写法就是这个顺序问题)。
+						var wantReload = false;
+						var activated = incoming.state === "activated";
 						incoming.addEventListener("statechange", function () {
 							// 【只在 activated 才刷】installed 时新 SW 还没接管,这时刷新仍由旧 SW
 							// 响应 → 拿到的还是旧代码,白刷一次还让用户以为更新失败。
-							if (incoming.state === "activated") {
+							if (incoming.state !== "activated") {
+								return;
+							}
+							activated = true;
+							// 用户还没回答完(wantReload 尚未赋值)时不刷,交给弹窗之后那次补检
+							if (wantReload) {
 								location.reload();
 							}
 						});
+						// 若已 waiting(装好没接管),催它跳过等待
+						if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+						// 同样用 confirm:装完就闷头刷新会打断正在进行的对局
+						wantReload = confirm("发现新版本,正在下载…\n\n下载完成后自动刷新页面生效?(已下载的离线素材会保留)\n选「取消」则不刷新,下次打开时自然生效。");
+						// 弹窗期间可能已经装完 activate 了(见上),补检一次,免得干等一个不会再来的事件
+						if (wantReload && (activated || incoming.state === "activated")) {
+							location.reload();
+						}
 						return;
 					}
 
-					// 没有 incoming,但线上戳和在跑的不一样 → 新 SW 已装好并接管,只是页面没刷新
+					// 线上戳 ≠ 页面正在跑的戳 → 新版已经装好在本地了,只是这个页面还跑着旧代码。
+					// 【用 confirm 不用 alert】刷新会中断正在进行的对局,得让用户自己选时机;
+					// 且 reload 是从 SW 缓存读本地文件,不像冷启动那样慢。
 					if (latest && runningStamp && latest !== runningStamp) {
-						alert("已更新到 v" + latest + ",即将刷新页面生效。");
-						location.reload();
+						if (confirm("发现新版本 v" + latest + "(当前 v" + runningStamp + ")。\n新版已下载完成,刷新页面即可生效。\n\n现在刷新?(进行中的对局会中断)")) {
+							location.reload();
+						}
 						return;
 					}
 
-					loadVersionStamp();
-					alert("已是最新版本" + (latest ? "(v" + latest + ")" : "") + "。");
+					// 【没问到线上戳时不能报"已是最新"】离线/超时都会让 latest 为 null,那时压根不知道
+					// 线上是哪一版,报"最新"是撒谎。
+					if (!latest) {
+						alert("联网检查失败,无法确认是否有新版本。\n当前版本:" + (runningStamp ? "v" + runningStamp : "未知") + "\n请确认网络后重试。");
+						return;
+					}
+					// runningStamp 缺失(开发服务器下占位符没被替换)→ 无从比对,同样不能报"已是最新"
+					if (!runningStamp) {
+						alert("线上最新版本:v" + latest + "\n当前页面版本未知(非正式构建),无法比对。");
+						return;
+					}
+					alert("已是最新版本(v" + latest + ")。");
 				} catch (e) {
 					console.error("检查更新失败:", e);
 					alert("检查更新失败:" + (e && e.message ? e.message : e));
