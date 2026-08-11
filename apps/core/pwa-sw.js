@@ -100,20 +100,8 @@ function fetchSafe(input, init, ms = 2000) {
 let failStreak = 0;
 const OFFLINE_STREAK = 3;
 const looksOffline = () => failStreak >= OFFLINE_STREAK;
-// 【谁在喂这个账本 —— 改动前它曾经饿死过】02331f7 给命中分支的 revalidate 加了
-// !isCodeAsset 之后,"缓存装齐"的冷启动会一个 noteNetResult 都产生不了:
-// 代码文件不再逐个后台校验(那 600 个失败原本是 streak 的唯一来源)、素材校验被
-// assetRevalidateWindow 关着、codeNeedsNetwork 分支在 STALE_KEY 不存在时整个跳过。
-// 于是 failStreak 恒为 0 → looksOffline() 恒假 → 下面 miss 分支那个"离线一个往返都不发"
-// 的快失败短路**永不生效**,离线冷启动退化成"每个未缓存资源各等满 4~8s 串行累加"。
-// 讽刺的是缓存下得越全越慢(越没有失败样本)。故必须显式保证:每次冷启动都有请求给它喂数据。
-// 现在的喂食点 = 导航请求(必然发生,strong)+ manifest 分支(下载器/检查更新时)。
-// strong=true:这一次失败足以单独判定离线(目前只有导航请求用)。
-// 【为什么给导航开这个特权】导航失败 = 连站点根路径都拿不到,不存在"单个资源恰好挂了"那种
-// 误判空间;而它又是冷启动的第一个请求,判定得越早,后面省掉的干等越多。普通资源仍需 3 次。
-function noteNetResult(ok, strong) {
+function noteNetResult(ok) {
 	if (ok) failStreak = 0;
-	else if (strong) failStreak = OFFLINE_STREAK;
 	else if (failStreak < OFFLINE_STREAK) failStreak++;
 }
 
@@ -392,24 +380,14 @@ self.addEventListener("fetch", event => {
 					|| await cache.match("./index.html");
 
 				// 后台静默网络更新(fetchSafe 带超时,Safari 断网不会永久挂)
-				// 【这里的 noteNetResult 是离线判定的命门,别再把它省掉】导航是每次冷启动
-				// 必然发出、且**唯一**必然发出的网络请求(代码/素材都命中缓存时一个请求都不发)。
-				// 它以前 .catch(() => null) 把失败静静吞了 → 账本收不到任何数据 → looksOffline()
-				// 永假 → 后面每个未缓存资源都要各等满 4~8s。故失败必须记账,且按 strong 记:
-				// 连首页都拿不到就是真离线,没有误判空间,而它又发生在启动链最前面(判得最早、
-				// 省掉的干等最多)。
 				const bgUpdate = fetchSafe(req)
 					.then(async resp => {
-						noteNetResult(true);
 						if (resp && resp.status === 200) {
 							cache.put(req, await sanitizeResponse(resp.clone()));
 						}
 						return resp;
 					})
-					.catch(() => {
-						noteNetResult(false, true);
-						return null;
-					});
+					.catch(() => null);
 
 				if (cached) {
 					bgUpdate; // 不 await,后台更新
@@ -461,17 +439,12 @@ self.addEventListener("fetch", event => {
 				const cache = await caches.open(CACHE);
 				try {
 					const resp = await fetchSafe(req);
-					noteNetResult(true);
 					if (resp && resp.status === 200) {
 						const clean = await sanitizeResponse(resp.clone());
 						cache.put(req, clean);
 					}
 					return await sanitizeResponse(resp);
 				} catch {
-					// 也给账本喂一笔(不用 strong:清单单个失败不如导航失败那么确定)。
-					// 冷启动走不到这里(清单只有下载器/检查更新/repair 才取),但离线点「下载离线
-					// 资源」时,这几笔能让 looksOffline() 尽快为真,免得后续批量请求各等满超时。
-					noteNetResult(false);
 					const cached = await cache.match(req);
 					if (cached) return cached;
 					// 离线且无缓存:兜底体必须与消费方期待的类型一致 ——
