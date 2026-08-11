@@ -38,7 +38,7 @@
 | `Response served by service worker has redirections` 白屏 | CF 把 `/index.html` 307 重定向到 `/`,SW 缓存了 redirected 响应;iOS 禁止 SW 返回 redirected 响应 | `sanitizeResponse()`:redirected 响应用响应体重建干净副本再缓存/返回。`start_url` 改 `/` 避免重定向 |
 | `localStorage null is not an object` 崩溃 | iOS PWA/隐私模式下 localStorage 可能为 null | index.html 最早期做内存兜底(usable 探测→内存实现) |
 | 冷启动"加载内容失败(undefined)" | 冷启动并发拉大量文件、SW 未接管,偶发失败 | 超时 30s + boot 失败自动 reload 重试一次(sessionStorage 防死循环) |
-| **断网启动白屏几十秒 / 弹"未正常载入"(真凶)** | **iOS 主屏 PWA 的 UA 缺"Safari"→ `get.is.safari()=false` → 启用沙盒 → `initializeSandboxRealms` 建 about:blank iframe 加载 sandbox.js;该 iframe 子请求在 iOS WebKit 上【不走父页 SW】→ 断网永久 pending → `await`(initRealms.js:118)永久挂 → 30秒看门狗弹框。SW 超时对它无效(请求没进 SW)** | **根治:`init/index.ts:53` 加 `&& lib.device !== "ios"` 让 iOS 也跳过沙盒(和 Safari 浏览器一致,已验证能进)。沙盒仅隔离联机远程代码、单机不依赖,且本 fork 编译期已禁用沙盒(initRealms.js SANDBOX_ENABLED=false),跳过零副作用 |
+| **断网启动白屏几十秒 / 弹"未正常载入"(真凶)** | **iOS 主屏 PWA 的 UA 缺"Safari"→ `get.is.safari()=false` → 启用沙盒 → `initializeSandboxRealms` 建 about:blank iframe 加载 sandbox.js;该 iframe 子请求在 iOS WebKit 上【不走父页 SW】→ 断网永久 pending → `await`(initRealms.js:118)永久挂 → 30秒看门狗弹框。SW 超时对它无效(请求没进 SW)** | **2026-08-11 扩大到无条件跳过:`sandboxEnabled = false`。原来只对 iOS/Safari 跳过,于是桌面/安卓浏览器仍中招 —— 实测桌面 UA 离线冷启动 60 秒出不了首屏(卡死→30s 看门狗→entry.ts 自动 reload→再卡 30s),而 iOS 走跳过分支只要 1 秒。iframe 绕过 SW **不是 iOS 独有,规范如此**,之前误以为是 iOS 特性 |
 | SW 未命中缓存的资源断网 fetch 永久 pending | 未命中用无超时 fetch;iOS 断网 fetch 不 reject | miss 分支超时分档(见下),但注意:绕过 SW 的请求(如沙盒 iframe)此法无效,那类要从源头跳过 |
 | 断网启动慢到"分钟级"(不只是某一个请求挂死) | SW 是单线程事件循环,几百个注定失败的 miss 各等满 4~8s 会排成长队,累加轻松几十秒 → 撞 30s 看门狗 | `pwa-sw.js` 加**纯内存离线启发式**:连续 3 个网络请求全失败 → 判"疑似离线" → 之后 miss 直接快失败、hit 分支也不发后台 revalidate;任何一次成功立即复位。下载器(`no-cache`)永不短路 |
 | jit-test.ts / service-worker.js 断网加载失败 | 这些 dist 根级散文件漏在预缓存清单外(清单只扫子目录) | build.ts 补扫 dist 根一层的 .js/.ts 进核心清单 |
@@ -114,8 +114,12 @@
   导航走 Network-First 就是 WebKit 断网白屏(见上「历史横跳教训」第一条)。清单能用是三个条件同时成立:
   ①调用频率极低(只在点「下载离线资源」和 SW install 时)②体积小有 2s 超时兜底 ③有缓存 fallback
 - **缓存桶名恒为 `noname-pwa-v2`,activate 只删非当前桶**;改文件名/桶名会让"换版部署离线可用"风险剧增
-- **新增任何"绕过 SW"的请求(非 GET / 跨域 / iframe 子请求)必须自带 `AbortController` 超时** —— SW 的超时兜底对它们无效。这是本项目重复踩了**三次**的同一类坑(沙盒 iframe、HEAD 探测、`ALWAYS_404` 必须放在 `method !== "GET"` 之前)
+- **新增任何"绕过 SW"的请求(非 GET / 跨域 / iframe 子请求 / 浏览器自己发的 icon)必须自带 `AbortController` 超时,或者干脆别发** —— SW 的超时兜底对它们无效。这是本项目重复踩了**四次**的同一类坑(沙盒 iframe 的 iOS 分支、HEAD 探测、`ALWAYS_404` 必须放在 `method !== "GET"` 之前、沙盒 iframe 在桌面/安卓上同样中招)。
+  **判据:凡是不由页面 JS 直接 `fetch()` 发出的请求,都先问一句"它进不进 SW"。**
 - **`ALWAYS_404` 只许放"线上结构性不存在"的路径**,且必须放在 `req.method !== "GET"` 判断**之前**(见第五节)。往里加东西前先确认那个路径**永远**不会有文件 —— 加错了就是把真实资源挡死,而且离线时查不出来
+- **`assetRevalidateWindow` 只许由 install 打开,别改成"每次启动开"或落盘持久化** —— 它存在的全部意义就是让
+  素材校验跟着换版走一次而不是每次冷启动都跑(见第五节病因三)。改回去就是把那 12 个请求请回来
+- **沙盒保持 `sandboxEnabled = false`** —— 要真启用得先解决 iframe 绕过 SW(见第五节病因四)
 
 ### 其它 iOS 认知(实测纠正过的)
 - **独立主屏 PWA 缓存稳定,不会被 iOS 乱清**(早先"7天清理/内存驱逐"说法对主屏 PWA 不成立)
@@ -136,9 +140,9 @@
 | **产物更新后"下载离线资源"仍显示旧总数(如清单已 14294 却仍报 14993)** | 两个清单 json 走**默认 SWR 分支** → 命中旧缓存秒返回,新清单只在后台更新、下次打开才生效。下载器虽写了 `cache:"no-cache"`,但那**只约束浏览器 HTTP 缓存,请求照样进 SW 被 Cache Storage 拦下** —— SW 里 `no-cache` 仅用于 `missTimeoutMs` 豁免超时,从不用来跳过缓存。**危害不只是数字难看:按旧清单下载会漏掉新增素材**(新补的立绘照样是剪影) | `pwa-sw.js` 把两个 `*-assets.json` 和 `pwa-version.json` 一起走 **Network-First**。清单 gzip 后仅 57KB / 实测 0.14s,`fetchSafe` 默认 2s 超时余量 14 倍,超时/离线 fallback 缓存。**另:离线兜底体必须按类型分流** —— 清单给 `[]`,`pwa-version.json` 给 `{}`;原先统一给 `{}` 会让下载器 `[...new Set([...coreList, ...allList])]` 抛 not iterable |
 | **进度条虚报"下载完成 N/N"(潜在隐患,尚未发作)** | `downloadOfflineAssets` 批处理里只有 `if (r.status === 200)` 才 `cache.put`,但**非 200 也正常 resolve** → `allSettled` 判 `fulfilled` → `done++`。即"计数涨了但缓存里没东西" | 实测当前清单**无 404**(890 个非 ASCII 路径经 `fetch` 自动编码后都是 200),故暂未发作。若哪天清单与产物脱节(上游删文件而清单未更新)就会悄悄骗人。修法:非 200 抛错,或单独计失败数并在结尾提示 |
 
-**清单口径别搞混**:`pwa-core-assets.json` = **716**(SW install 预缓存,启动+标准局必需,29.9MB);
-`pwa-all-assets.json` = **14364**(核心之外的大素材)。两者**交集 0** —— 
-下载器核对的是**合并清单**,所以界面显示的总数是两者之和(15080),不是 14364。core 排在合并数组前面,
+**清单口径别搞混**:`pwa-core-assets.json` = **730**(SW install 预缓存,启动+标准局必需,31.2MB);
+`pwa-all-assets.json` = **14350**(核心之外的大素材)。两者**交集 0** —— 
+下载器核对的是**合并清单**,所以界面显示的总数是两者之和(15080),不是 14350。core 排在合并数组前面,
 故按钮下载时**核心优先**(且它们通常已被 SW 预缓存过,直接算已完成)。
 
 **核心清单的收录判据(2026-08-11 校准,别再凭直觉加减)**:进核心的唯一标准是
@@ -155,6 +159,12 @@
   文件数是 **0**。但这几张图不是游戏代码 fetch 的,是**浏览器自己**按 `<link rel="icon">` 和
   `manifest.icons` 去拉的 —— 不管用户点没点过下载,每次冷启动都要,standalone 启动图标也用它。
   实测 12 次冷启动 12 次都打网络。**判据是"谁发起这个请求",游戏代码之外还有浏览器自己。**
+- **后来又补进去的(2026-08-11)**:11 张 `image/splash/style1/*.jpg`(`default-splash.ts:11`
+  的默认 style)+ `image/background/ol_bg.jpg` + `image/card/handcard.png` +
+  `image/card/tiesuo_mark.png`,约 1.4MB。实测 20 轮冷启动这几张 **19~20/20 必现**。
+- **明确不收的**:`font/xinwei.woff2`(7.5MB)、`audio/background/music_default.mp3`(3.4MB)。
+  它们同样每轮必现,但单个就顶掉核心清单 1/4~1/3 体积 —— 收进去反而抬高 install 被掐断的概率。
+  它们靠「下载离线资源」装,装完后由 `assetRevalidateWindow` 保证不再重复校验(见第五节病因三)。
 
 **CF 文件数上限**:Workers Static Assets 限 **20000 个文件**(单文件 25MiB)。当前 dist = **15356**
 (audio 9380、image 4044、extension 854),余量约 4600。真撞墙时按此优先级处置:
@@ -175,15 +185,27 @@
 
 ---
 
-## 五、冷启动变慢(2026-08-11)—— 在线烧带宽、离线烧超时,是两个病
+## 五、冷启动变慢(2026-08-11)—— 一个症状,四个独立病因
 
 **症状是一个**:冷启动(关掉 standalone PWA 再开)从 7~8 秒变 15 秒,**在线和离线一样慢**。
-**病因是两个,机制完全不同**。这一点非常反直觉,查的时候差点用一个解释套住两边 ——
+**病因查出来是四个,机制互不相同**。这一点非常反直觉,查的时候差点用一个解释套住两边 ——
 「在线要重下 35MB」解释得了在线,但**离线一个字节都不下载,那条解释在离线场景下根本不成立**。
 先记住这个分流判据:
 
 > **在线慢 = 吞吐问题(下了多少字节)。离线慢 = 延迟问题(等了多少个超时)。**
 > 如果在线和离线耗时**差不多**,瓶颈就一定不在吞吐 —— 因为离线不下载,却没有变快。
+
+四个病因速览(详见各小节):
+
+| | 影响面 | 机制 | 修法 |
+|---|---|---|---|
+| 病因一 | 在线 | install 失败删构建戳 → 缓存完整但 SW 全部绕开 → 重下 35MB | 保戳,改记 `STALE_KEY`(可收敛) |
+| 病因二 | 离线 | 4 个必然 404 的请求串在 boot await 链上各等 4s | `ALWAYS_404` 短路 |
+| 病因三 | 两边 | 素材后台 SWR 每次冷启动跑 12 个(**下得越全跑得越多**) | `assetRevalidateWindow` 每构建只校验一次 |
+| 病因四 | 桌面/安卓离线 | 沙盒 iframe 加载 `sandbox.js`,iframe 不走 SW → 永久 pending → 60s 都出不了首屏 | `sandboxEnabled = false` 无条件跳过 |
+
+**⚠️ 病因二的修法引入过一个回归,病因三顺带修掉了** —— 详见病因二末尾。这是本节最值得记住的一课:
+**删一个"纯浪费"的请求前,先查有没有别的机制在靠它的副作用工作。**
 
 ### 病因一(在线):install 失败时删构建戳,是粘住不自愈的性能悬崖
 
@@ -243,6 +265,64 @@
   `importing binding name 'c' is not found` 之类的 link 错。
 
 实测改后 19 次冷启动里这四个 **0 次**上网(改前 12/12 必现)。
+
+**⚠️ 但这个修法引入了一个回归(当天即发现并修掉,见病因四)**:直接返 404 就**不会调 `noteNetResult(false)`**
+→ `failStreak` 永远涨不到 3 → `looksOffline()` **永远是 false**。那四个"浪费"的请求原来**兼职当离线探针**,
+砍掉它们等于把离线检测一起砍了。表现:离线时素材的后台 revalidate 照样发、各等满超时,iOS 还多弹一个
+**「蜂窝数据已关闭」**(以前没有)。**教训:删一个看似纯浪费的请求前,先查有没有别的机制在靠它的副作用工作。**
+
+### 病因三(两边都有):素材的后台 SWR 每次冷启动都跑,而且"下得越全跑得越多"
+
+`pwa-sw.js` 命中缓存分支原来对**每个非代码素材**都发一个后台 fetch 问"变了没"。实测每次冷启动
+**固定 12 个**:`icon-192.png`×2、`ol_bg.jpg`、`handcard.png`、`tiesuo_mark.png`、`card.png`、
+`xinwei.woff2`、`music_default.mp3`、`huangcao.woff2`、11 张 `splash/style1/*.jpg`(轮换出现)。
+
+**★ 反直觉的关键点:它的触发条件是「缓存命中」,所以下载得越全,这种请求越多。** 一个字节都没下的人
+反而不会有(走 miss 分支直接下真文件)。排查时被这一点误导过 —— 以为"用户已经下载完了就不该有请求了",
+恰恰相反。
+
+代价:
+- **在线**:CF 认 `If-None-Match`(实测 `curl -I -H 'If-None-Match: ...'` → `304 Not Modified`),
+  所以是 12 个**零字节**往返。字节不是问题,**占满 SW 单线程**才是。
+- **离线**:12 个各等满 `missTimeoutMs`,外加 iOS 弹「蜂窝数据已关闭」。
+
+**修法**:`assetRevalidateWindow` —— 素材校验从「每次冷启动」改成「**每个构建一次**」。install 时开窗
+(换版必然走 install,而 install 必然在线,因为清单是网络取的),SW 被回收后窗口自然关闭。
+- **为什么这不丢更新能力**:素材只可能在"又部署了一版"时变,而那一版必然有 install。校验跟着 install
+  走一次就够,不需要每次启动重来。
+- **为什么用内存变量而不落盘**:它不需要跨 SW 重启存活 —— 窗口关着正是我们想要的快路径,下次真换版
+  又会有新 install 重新开窗。丢了只是更快,没有正确性损失(与 `STALE_KEY` 必须落盘的理由正好相反,
+  那个丢了会退化成"永远从头再来")。
+- 顺带把**启动路径上的小素材收进核心清单**:11 张 `splash/style1/*.jpg` + `ol_bg.jpg` +
+  `handcard.png` + `tiesuo_mark.png`,约 1.4MB(核心 716→730,29.9→31.2MB)。
+  **`xinwei.woff2`(7.5MB)和 `music_default.mp3`(3.4MB)故意不收** —— 单个就顶掉核心清单
+  1/4~1/3 体积,而 install 是 `cache:"reload"` 全量重下,清单越大在手机弱网被掐断的概率越高,
+  掐断的代价是留下"缓存装着却不被信任"的状态(病因一),远大于省下的两次超时。
+
+### 病因四(桌面/安卓,离线):沙盒 iframe 加载 sandbox.js —— 60 秒都出不了首屏
+
+**这条是查病因三时顺带实测挖出来的,之前完全不知道。**
+
+第二节表格里那条"iOS 沙盒 iframe"以前只对 **iOS/Safari** 跳过。实测发现 **iframe 子请求不走父页 SW
+是规范行为,不是 iOS 特性** —— 所以桌面/安卓浏览器一直在踩:
+
+| UA | `lib.device` | 沙盒 | 离线冷启动首屏 |
+|---|---|---|---|
+| 桌面 Edge | `undefined` | **启用** | **60 秒都没出来**(卡死→30s 看门狗→`entry.ts` 自动 reload→再卡 30s,无限循环) |
+| iPhone | `"ios"` | 跳过 | **1023ms** |
+
+离线时缓存里明明有 `sandbox.js` 也用不上(请求没进 SW),永久 pending → `initRealms.js:118` 的
+`await promise` 挂死。**修法:`sandboxEnabled = false` 无条件跳过。**
+安全性论证:本 fork 里 `initRealms.js:5` 是 `SANDBOX_ENABLED = false`,传 `true` 进去也只是白加载
+一遍 iframe,`isSandboxEnabled()` 照样返回 false,`security.initSecurity` 拿到 false 后直接 return
+—— 即"启用"这条路除了发那个会挂死的网络请求,**什么也没做成**。
+
+**⚠️ 上游合并注意**:若哪天要真启用沙盒(`initRealms.js` 的 `SANDBOX_ENABLED` 改回 true),
+必须先解决 iframe 绕过 SW 的问题(如把 sandbox.js 内联 / 用 `blob:` URL 注入),否则离线必然回归白屏。
+
+**★ 这是本项目第四次踩「绕过 SW 的请求」**(前三次:沙盒 iframe 的 iOS 分支、`checkFile` 的 HEAD 探测、
+`ALWAYS_404` 的放置位置)。**判据:凡是不由页面 JS 直接 `fetch()` 发出的请求,都要先问一句"它进不进 SW"**
+—— iframe 子资源、HEAD、非同源、`<link rel=icon>`/manifest icons 全是这一类。
 
 ### ★ 决策记录:为什么至今没给产物加 content hash
 
@@ -309,8 +389,17 @@ iOS 不许 SW 返回 redirected 响应(`sanitizeResponse`)、后台 install 被�
   用 **`127.0.0.2`**:仍是安全上下文(SW 能注册),但不在 LOCAL_HOSTS。
 - **必须真关掉整个浏览器再开**(Playwright 用 `launchPersistentContext` + 每轮 `ctx.close()`),
   开新标签页不算冷启动 —— SW 进程还活着,`getCodeState` 的内存缓存也还在,测不出真实首屏。
+  **2026-08-11 又栽了一次**:验收脚本每轮只 `page.close()` 却复用同一个 browser,于是 SW 从没被回收,
+  `assetRevalidateWindow` 全程开着 —— 量出来的 19 轮数据**完全没测到**要验的那个机制。
+  **凡是验"跨 SW 生命周期"的行为(内存标记、启发式复位),不真关浏览器就是白测。**
 - 想看"每次冷启动到底有多少请求真打到网络",在服务器侧记访问日志最准(SW 命中缓存的请求
   压根不会出现在日志里,这比在浏览器 Network 面板里筛更干净)。
+- **测离线要用"服务器收到请求但永不回应"来模拟,不是关服务器** —— 关掉服务器是 TCP 秒拒
+  (等于 Chromium 行为),而 iOS WebKit 断网是**长挂**。用一个可切模式的本地服务器
+  (`hang` = 收到请求扣住 response 不回),才能复现真实的离线卡死。据此才发现病因四。
+- **UA 会改变启动路径,单一 UA 测不全** —— `util/index.js:24` 的 `device` 按 UA 判定,
+  桌面拿到 `undefined`、iPhone 拿到 `"ios"`,而沙盒开关直接看它。同一份代码两条路,
+  病因四就藏在桌面那条上(iPhone 反而没事)。**测启动性能至少跑桌面 + iPhone UA 两组。**
 
 ---
 
@@ -321,9 +410,10 @@ iOS 不许 SW 返回 redirected 响应(`sanitizeResponse`)、后台 install 被�
 | 文件 | 我们的改动 | 检查点 |
 |---|---|---|
 | `apps/core/noname/init/browser.js` | ①文件接口退回 URL + IndexedDB(纯静态模式) ②`fetchWithTimeout` + `checkFile` 的 HEAD 探测带 2s 超时(治 standalone 离线卡 60s) | 探测文件服务器 + 读写走 fetch/IndexedDB 还在吗;**HEAD 还带着超时吗** |
-| `apps/core/noname/init/index.ts` | ①启动超时 30s ②`sandboxEnabled` 加 `&& lib.device !== "ios"`(跳沙盒治白屏) | 这两处还在吗 |
+| `apps/core/noname/init/index.ts` | ①启动超时 30s ②`sandboxEnabled = false` **无条件**跳过沙盒(2026-08-11 从"仅 iOS 跳过"扩大而来,治桌面/安卓离线 60s 白屏,见第五节病因四) | 这两处还在吗;**上游若要真启用沙盒,必须先解决 iframe 绕过 SW 的问题** |
 | `apps/core/index.html` | ①localStorage 内存兜底 ②PWA meta/SW 注册 ③onerror 忽略 NotAllowedError ④QUERY_PRECACHE | 这几段内联脚本还在吗 |
-| `apps/core/pwa-sw.js` | (新增文件)缓存策略 + `missTimeoutMs` 超时分档 + `failStreak` 离线启发式 + `ALWAYS_404` 短路 + install 失败保戳记 `STALE_KEY` | 上游不会动,但改它前必读本文档「断网白屏根治方案」和第五节 |
+| `apps/core/pwa-sw.js` | (新增文件)缓存策略 + `missTimeoutMs` 超时分档 + `failStreak` 离线启发式 + `ALWAYS_404` 短路 + install 失败保戳记 `STALE_KEY` + `assetRevalidateWindow`(素材每构建只校验一次) | 上游不会动,但改它前必读本文档「断网白屏根治方案」和第五节 |
+| `scripts/build.ts` | 核心清单:剔掉 `service-worker.js`/eslint-linter/废弃 vue 兼容层;补进 `image/pwa`+根图标+11 张 splash+`ol_bg`/`handcard`/`tiesuo_mark` | 收录判据见第五节「核心清单的收录判据」,别凭直觉加减 |
 | `apps/core/noname/entry.ts` | 无改动,但 `await import("/preload.js")` 这个**故意失败**的探测被 `ALWAYS_404` 短路了 | 上游若改了平台分派方式(不再靠 import 失败),要同步删掉 `ALWAYS_404` 里的 `/preload.js`,否则会挡住真实文件 |
 | `apps/core/noname/game/index.js` | ①createServer/connect 的 PeerJS 分流 ②createServer 开头 `if(!lib.node)lib.node={}` | 联机 P2P 分流还在吗 |
 | `apps/core/noname/library/element/content.ts` | waitForPlayer 改 `await game.createServer()` | 还在吗 |

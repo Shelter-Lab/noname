@@ -130,6 +130,21 @@ console.log("生成 PWA 资源清单");
 		if (existsSync(path.join("dist", f.slice(2)))) core.add(f);
 	}
 
+	// 【启动路径上的小素材也进核心】实测 20 轮冷启动,这几张每轮必现(19~20/20):
+	// ol_bg.jpg 是主菜单背景、handcard/tiesuo_mark 是卡牌 UI 框、splash/style1/* 是 11 张
+	// 模式启动图(default-splash.ts 的默认 style)。它们和 PWA 图标同理 —— 不管用户有没有点过
+	// 「下载离线资源」,每次冷启动都要,没缓存的话离线时要各等满 missTimeoutMs。
+	// 加起来约 1.4MB,相对核心清单 30MB 可以忽略。
+	// 【为什么 xinwei.woff2(7.5MB)和 music_default.mp3(3.4MB)不进】它们同样每轮必现,但
+	// 单个就顶掉核心清单 1/4~1/3 的体积,而 install 是 cache:"reload" 全量重下 —— 清单越大,
+	// 手机弱网被中途掐断的概率越高,而掐断的代价是留下"缓存装着却不被信任"的状态(见 pwa-sw.js
+	// install 的 catch),那个损失远大于省下的两次超时。它们靠「下载离线资源」装,装完之后
+	// assetRevalidateWindow 保证不再重复校验。
+	for (const f of await listAssets("image/splash/style1")) core.add(f);
+	for (const f of ["./image/background/ol_bg.jpg", "./image/card/handcard.png", "./image/card/tiesuo_mark.png"]) {
+		if (existsSync(path.join("dist", f.slice(2)))) core.add(f);
+	}
+
 	// 全量可下载:核心之外的大素材(立绘、语音、内置扩展、花体字)。
 	// 由游戏内"下载离线资源"按钮按需批量缓存,可中断续传。
 	const heavy: string[] = [];

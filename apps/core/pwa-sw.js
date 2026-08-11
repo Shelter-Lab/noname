@@ -105,6 +105,19 @@ function noteNetResult(ok) {
 	else if (failStreak < OFFLINE_STREAK) failStreak++;
 }
 
+// —— 素材后台校验的开窗:每个构建只开一次,不是每次冷启动都开 ——
+// 【病】命中缓存的素材原来一律发一个后台 fetch 问"变了没"。实测每次冷启动稳定 12 个这样的
+// 请求(icon/ol_bg/卡背/手牌框/花体字/splash/BGM),而且**下载得越全,这种请求越多**——
+// 它的触发条件恰恰是"缓存命中"。代价:在线 12 个 304 往返(零字节但占满 SW 单线程),
+// 离线 12 个各等满 missTimeoutMs,iOS 还会因此弹「蜂窝数据已关闭」。
+// 【关键认识】素材只有在"又部署了一版"时才可能变。而换版必然伴随一次 install(SW 字节变了),
+// 那一次也必然在线(清单都是网络取的)。所以校验只需要跟着 install 走一次,不需要每次启动重来。
+// 【为什么用内存标记而不落盘】它不需要跨 SW 重启存活:SW 被回收后窗口自然关闭,而"窗口关着"
+// 正是我们想要的快路径;下次真换版又会有新的 install 重新开窗。这跟"下载中"那种必须持久化的
+// 状态不同(丢了会误杀下载),这里丢了只是更快,没有正确性损失。
+// 【代码文件不受影响】代码永不逐文件 SWR(见 fetch 分支说明),整版由 install 换。
+let assetRevalidateWindow = false;
+
 // 决定"未命中缓存的请求"该用多长超时(0=不超时)。
 // 【关键教训】不能靠 navigator.onLine 判离线:iOS 主屏 PWA 飞行模式下 onLine 常仍报 true,
 // 导致超时档失效→走无超时 fetch→WebKit 断网永久 pending→boot 的 await 挂死→30s 白屏(standalone 白屏真凶)。
@@ -139,6 +152,9 @@ async function sanitizeResponse(resp) {
 }
 
 self.addEventListener("install", event => {
+	// 换版了(SW 字节变了才会走 install)→ 给素材开一次后台校验窗口,让更新过的立绘/语音能刷新。
+	// 之后的每次冷启动窗口都是关的,一个素材校验请求都不发(见 assetRevalidateWindow 处说明)。
+	assetRevalidateWindow = true;
 	// install 阶段预缓存"启动+标准对局必需"的核心文件(约 33MB,清单由构建生成)。
 	// 保证断网时也能稳定启动、进模式、玩标准局。失败不阻塞安装(降级为访问即缓存)。
 	// 注:保持简单快速——曾加"重试3轮+对账709项"导致 install 变慢/在 Safari 上迟迟装不上,
@@ -489,8 +505,15 @@ self.addEventListener("fetch", event => {
 				// 模块图链接失败 → "importing binding name 'c' is not found",行列号 0。
 				// 而且此时联网也救不了:它认为自己一致,压根不去网络。
 				// 故:代码文件只允许由 install 整版写入(cache:"reload" 全量),永不逐文件更新。
-				// 顺带每次启动省掉 600+ 个无用的后台请求。素材照旧 SWR,不受影响。
-				if (!looksOffline() && !isCodeAsset(url.pathname)) {
+				// 顺带每次启动省掉 600+ 个无用的后台请求。
+				//
+				// 【素材:只在换版那一次校验,不是每次冷启动】原来这里对每个命中缓存的素材都发一个
+				// 后台 fetch。实测每次冷启动固定 12 个(icon/ol_bg/卡背/花体字/splash/BGM),在线是
+				// 12 个 304 往返、离线是 12 个等满超时 + iOS 弹「蜂窝数据已关闭」。而素材只可能在
+				// 换版时变,换版必然有 install、install 必然在线 —— 跟着 install 开一次窗就够了。
+				// 【为什么不能靠 looksOffline 兜】它要连续失败 3 次才判离线,前 3 个素材照样各等满
+				// 超时;而且 ALWAYS_404 短路后那几个请求不再产生失败计数,streak 更涨不上去。
+				if (assetRevalidateWindow && !looksOffline() && !isCodeAsset(url.pathname)) {
 					fetchSafe(req)
 						.then(async resp => {
 							noteNetResult(true);

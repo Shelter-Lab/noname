@@ -50,13 +50,17 @@ export async function boot() {
 		await import("./compatible.js");
 	}
 
-	// iOS(含主屏 PWA)与 Safari 浏览器一致跳过沙盒。
-	// 原因:iOS 主屏 PWA 的 UA 常缺 "Safari" 致 is.safari() 漏判 → 启用沙盒 →
-	// initializeSandboxRealms 建 about:blank iframe 加载 sandbox.js,而该 iframe 子请求在
-	// iOS WebKit 上【不走父页 Service Worker】→ 断网时永久 pending → 卡到 30s 弹"未正常载入"白屏。
-	// 且沙盒仅隔离联机远程代码、单机/本体不依赖它,本 fork 更是编译期禁用了沙盒(SANDBOX_ENABLED=false),
-	// 故 iOS 跳过零副作用,只是省掉那个会卡死的无用 iframe 加载。用 lib.device 而非 UA 判断更稳。
-	const sandboxEnabled = !config.get("debug") && !get.is.safari() && lib.device !== "ios";
+	// 【本 fork 一律跳过沙盒】原来这里只对 iOS/Safari 跳过,其它平台照旧建 iframe 加载 sandbox.js。
+	// 但 iframe 子请求**不走父页 Service Worker**(不是 iOS 独有,规范如此),于是断网时:
+	// 缓存里明明有 sandbox.js 也用不上 → 请求永久 pending → initRealms.js 的 `await promise`
+	// 挂死 → 撞 boot 的 30s 看门狗 → entry.ts 自动 reload → 再挂 30s。实测桌面 UA 离线冷启动
+	// 60 秒都出不了首屏,而 iOS(走跳过分支)只要 1 秒 —— 差距全在这一个 iframe 上。
+	// 【为什么可以无条件跳过】沙盒在本 fork 是编译期禁用的:initRealms.js 里 SANDBOX_ENABLED=false,
+	// 传 true 进去也只是白加载一遍 iframe,isSandboxEnabled() 照样返回 false,security.initSecurity
+	// 拿到 SANDBOX_ENABLED=false 后直接 return。即"启用"这条路除了那次网络请求什么也没做成。
+	// 【上游合并注意】若哪天要真启用沙盒(initRealms.js 的 SANDBOX_ENABLED 改回 true),必须先解决
+	// iframe 绕过 SW 的问题(例如把 sandbox.js 内联/用 blob: URL 注入),否则离线必然回归成白屏。
+	const sandboxEnabled = false;
 
 	// 初始化沙盒的Realms
 	await initializeSandboxRealms(sandboxEnabled);
