@@ -178,7 +178,11 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 			async function inspectCache() {
 				if (!("caches" in window)) return null;
 				try {
-					var cache = await caches.open("noname-pwa-v2");
+					// 【必须是代码桶】拆桶后构建戳和待补名单都写在 noname-code-v1 里(见 pwa-sw.js 的
+					// CODE_CACHE / BUILD_KEY);这里原来还开着素材桶 noname-pwa-v2,读出来恒为 null。
+					// 以前这只让显示行少一段字,现在上面"要刷新还是要重装"的判断靠它,读错就会把
+					// "已经装好了、刷新就能生效"误判成"没装齐",反过来劝用户白下 30MB。
+					var cache = await caches.open("noname-code-v1");
 					var rec = await cache.match("/__pwa_build__");
 					var stampInCache = rec ? await rec.text() : null;
 					var staleRec = await cache.match("/__pwa_stale__");
@@ -189,6 +193,30 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 						stale: Array.isArray(staleList) ? staleList.length : 0,
 						entries: keys.length,
 					};
+				} catch (e) {
+					return null;
+				}
+			}
+
+			/**
+			 * 缓存里那份 index.html 是哪一版 —— 也就是"现在刷新的话,刷完会显示哪个版本戳"。
+			 * 【为什么必须直接读它,不能拿 BUILD_KEY 推】戳写死在 index.html 里,而刷新走的是
+			 * 导航请求 = Cache-First(见 pwa-sw.js 导航分支),读的就是这份缓存副本。
+			 * 而 BUILD_KEY 只是 install 的记账:install 拿不到清单时,catch 分支照样会把**新**戳
+			 * 写进 BUILD_KEY(只是同时把整份清单记成待补),这时首页其实一个字节都没换 ——
+			 * 拿 BUILD_KEY 判断就会误报"已下载完成,刷新即可生效",刷完还是老戳,正是要治的病。
+			 * 读取顺序必须和导航分支的匹配顺序一致(req → "/" → "/index.html" → "./index.html"),
+			 * 谁先命中用谁,否则预测的和刷出来的不是同一份。
+			 * @returns {Promise<string|null>} 10 位构建戳;null = 读不到或解析不出
+			 */
+			async function cachedIndexStamp() {
+				if (!("caches" in window)) return null;
+				try {
+					var cache = await caches.open("noname-code-v1");
+					var rec = (await cache.match(location.href.split("#")[0])) || (await cache.match("/")) || (await cache.match("/index.html")) || (await cache.match("./index.html"));
+					if (!rec) return null;
+					var m = (await rec.text()).match(/__PWA_RUNNING_BUILD__\s*=\s*"(\d{10})"/);
+					return m ? m[1] : null;
 				} catch (e) {
 					return null;
 				}
@@ -277,9 +305,28 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					// 【用 confirm 不用 alert】刷新会中断正在进行的对局,得让用户自己选时机;
 					// 且 reload 是从 SW 缓存读本地文件,不像冷启动那样慢。
 					if (latest && runningStamp && latest !== runningStamp) {
-						if (confirm("发现新版本 v" + latest + "(当前 v" + runningStamp + ")。\n新版已下载完成,刷新页面即可生效。\n\n现在刷新?(进行中的对局会中断)")) {
-							location.reload();
+						// 【不能无条件 location.reload() —— 这就是"点了好、重开版本戳还是老的"的原因】
+						// 版本戳写死在 index.html 里,而导航请求走 Cache-First(见 pwa-sw.js 导航分支):
+						// 刷新读的是**缓存里那份** index.html,不是服务器上的。缓存里换没换成新版,
+						// 完全取决于 install 有没有整批跑完 —— 而 install 是 cache:"reload" 全量重下
+						// 30MB,在手机上被系统掐断是常态,掐断后下次又从头开始。
+						// 没装齐就刷,刷一百次也还是老戳(用户实测"好几次都这样"就是这个),
+						// 而弹窗还写着"新版已下载完成",纯属撒谎。
+						// 故先看缓存里那份首页(= 刷新会读到的那份)到底是哪一版,再决定刷还是重装。
+						var htmlStamp = await cachedIndexStamp();
+						if (htmlStamp === latest) {
+							// 缓存里的首页确实已是新版,只是本页面内存里跑着旧代码 → 刷新真能生效
+							if (confirm("发现新版本 v" + latest + "(当前 v" + runningStamp + ")。\n新版已下载完成,刷新页面即可生效。\n\n现在刷新?(进行中的对局会中断)")) {
+								location.reload();
+							}
+							return;
 						}
+						// 缓存里还是旧首页 → 刷新纯属白刷。如实说明,并给出唯一真正管用的手段:
+						// __pwaRepair 用一次性查询串绕开 SW、并发重灌整批代码文件(含首页的每个 key)、
+						// 装完补戳,全程不依赖 install。
+						// 【为什么不退而求其次"只重取首页"】首页换了、js 还是旧的就是跨版本混搭 ——
+						// 正是 index.html 里那套自修复要治的病(模块图链接 SyntaxError)。要换就整批换。
+						forceReinstallCore("发现新版本 v" + latest + "(当前 v" + runningStamp + "),但新版还没在本地装齐" + (htmlStamp ? "(本地首页仍是 v" + htmlStamp + ")" : "") + "。\n\n此时刷新页面没有用:刷新读的是缓存里那份旧首页,版本戳不会变 —— 后台自动安装被系统中断时就是这个症状。");
 						return;
 					}
 

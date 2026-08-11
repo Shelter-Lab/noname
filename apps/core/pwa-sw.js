@@ -467,7 +467,15 @@ self.addEventListener("fetch", event => {
 					.catch(() => null);
 
 				if (cached) {
-					bgUpdate; // 不 await,后台更新
+					// 【必须 waitUntil,不能写个裸表达式就走】原来这里是 `bgUpdate;` —— 一句什么都不做的
+					// 表达式语句,只是"不 await"。问题在于响应一返回,这个 fetch 事件就算处理完了,
+					// 浏览器随时可以回收 SW;而调用方恰恰常是 location.reload()(「检查更新」里点"现在刷新",
+					// 或用户自己下拉刷新)—— 页面拆掉、SW 被回收,那次写入就这么没了。
+					// 于是"本次给旧首页、把新的写回缓存"这个本文件赖以成立的前提根本不保:新 index.html
+					// 一直写不进去,版本戳永远停在老值(用户实测"检测到新版 → 点好 → 重开还是老戳,好几次
+					// 都这样"),index.html 里那套自修复也永远到不了用户手里。
+					// waitUntil 让 SW 至少活到这次写入完成为止,代价仅是几十 KB 的一次后台请求。
+					event.waitUntil(bgUpdate);
 					return await sanitizeResponse(cached);
 				}
 
