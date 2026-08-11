@@ -185,7 +185,19 @@ self.addEventListener("install", event => {
 						batch.map(async url => {
 							const r = await fetch(url, { cache: "reload" });
 							if (r && r.status === 200) {
-								await cache.put(url, await sanitizeResponse(r));
+								const clean = await sanitizeResponse(r.clone());
+								await cache.put(url, clean);
+								// 【首页必须同时写 "/" ——否则 install 的整版 reload 对首页无效】
+								// 导航分支匹配的 key 依次是 req(通常是 "/")、"/"、"/index.html"、
+								// "./index.html",而清单里写的是 "./index.html":两个 key 不同,于是
+								// install 明明用 cache:"reload" 取回了新首页,导航实际读的 "/" 还是旧的。
+								// 后果:index.html 只能靠导航分支的 SWR 慢一拍更新(本次喂旧、写回新、
+								// 下次才生效),所以改 index.html 的修复至少要开两次 App 才生效 ——
+								// 而"启动就报错"这类故障根本撑不到第二次。repair() 里早就写了这一条
+								// (它对 index.html 额外 put 一份 "/"),install 这边一直漏着。
+								if (/\/index\.html$/.test(url) || /^\.\/index\.html$/.test(url)) {
+									await cache.put("/", await sanitizeResponse(r.clone()));
+								}
 								return true;
 							}
 							throw new Error("预缓存失败 " + url);
@@ -204,7 +216,11 @@ self.addEventListener("install", event => {
 						missed.map(async url => {
 							const r = await fetch(url, { cache: "reload" });
 							if (r && r.status === 200) {
-								await cache.put(url, await sanitizeResponse(r));
+								await cache.put(url, await sanitizeResponse(r.clone()));
+								// 同上:首页要额外写 "/",否则导航分支读到的还是旧首页
+								if (/\/index\.html$/.test(url) || /^\.\/index\.html$/.test(url)) {
+									await cache.put("/", await sanitizeResponse(r.clone()));
+								}
 								return url;
 							}
 							throw new Error("重试仍失败 " + url);
