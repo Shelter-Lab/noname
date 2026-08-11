@@ -207,7 +207,7 @@
 		"yijiang",
 		"yingbian"
 	],
-	"moderned_modes": ["guozhan"],
+	"moderned_modes": ["guozhan", "langrensha"],
 	"connect_characters": ["diy"],
 	"connect_cards": ["huodong", "guozhan", "sp", "zhulu", "yingbian", "yongjian", "xianxia"],
 	"plays": [],

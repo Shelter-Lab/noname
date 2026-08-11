@@ -64,6 +64,7 @@ window.noname_package = {
 		tafang: "塔防",
 		stone: "炉石",
 		brawl: "乱斗",
+		langrensha: "狼人杀",
 	},
 	submode: {
 		identity: {

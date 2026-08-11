@@ -8732,6 +8732,100 @@ export class Library {
 				},
 			},
 		},
+		langrensha: {
+			name: "狼人杀",
+			// 不在 config.json 的 stockmode 里，开场闪屏必须自带图，否则 OnloadSplash 会读到 undefined
+			splash: "image/splash/style1/brawl.jpg",
+			connect: {
+				connect_langrensha_mode: {
+					name: "游戏模式",
+					frequent: true,
+					init: "normal",
+					item: {
+						normal: "标准模式",
+					},
+					restart: true,
+					intro: "模式的选择",
+				},
+				connect_player_number: {
+					name: "游戏人数",
+					init: "8",
+					get item() {
+						return lib.mode.identity.config.player_number.item;
+					},
+					frequent: true,
+					restart: true,
+					intro: "本模式没有AI，所有座位都必须是真人。<br>身份表为固定顺序，少于8人会从尾部截断导致板子不完整（如4人只有狼/民/民/预言家，没有女巫和猎人），建议按板子选8人或10人。",
+				},
+				connect_langrensha_banzi: {
+					name: "游玩板子",
+					frequent: true,
+					init: "normal",
+					item: {
+						normal: "普通8人（屠边）",
+						juegu: "8-10人觉醒孤独少女（屠城）",
+					},
+					restart: true,
+				},
+				connect_langrensha_victoryMode: {
+					name: "游戏结束方式",
+					frequent: true,
+					init: "tubian",
+					item: {
+						tubian: "屠边",
+						tucheng: "屠城",
+					},
+					restart: true,
+					intro: "屠边：神/民一类阵营全部阵亡狼人获胜。屠城：好人全部阵亡狼人获胜。",
+				},
+				connect_langrensha_listNum: {
+					name: "玩家选将框",
+					frequent: true,
+					init: "20",
+					item: {
+						10: "十个",
+						20: "二十个",
+						30: "三十个",
+						40: "四十个",
+						50: "五十个",
+						60: "六十个",
+						70: "七十个",
+						80: "八十个",
+						90: "九十个",
+						100: "一百个",
+					},
+					restart: true,
+					intro: "选将的时候每个人多少个选将框<br>务必计算好将池数量是足够的！",
+				},
+				connect_chooseCharacter_moreTime: {
+					name: "选将时间",
+					frequent: true,
+					item: {
+						10: "10秒",
+						15: "15秒",
+						30: "30秒",
+						60: "60秒",
+						90: "90秒",
+						120: "120秒",
+					},
+					init: "30",
+					intro: "选将的时候的时间限制",
+				},
+				connect_langrensha_bancharacter: {
+					name: '<span style="text-decoration: underline">一键使用身份模式禁将</span>',
+					clear: true,
+					frequent: true,
+					onclick() {
+						game.saveConfig("connect_langrensha_banned", lib.config.connect_identity_banned);
+						game.prompt("导入成功，重启生效！", "alert");
+					},
+				},
+			},
+			// 死亡流程会在广播回调里读 lib.mode[mode].config.dierestart（每端都读），缺了会抛错
+			config: {
+				dierestart: false,
+			},
+		},
 	};
 	status = {
 		running: false,
