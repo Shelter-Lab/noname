@@ -121,6 +121,22 @@
 					console.warn("[忽略无害错误] 媒体自动播放被拦截:", msgStr);
 					return;
 				}
+				// 【模块混版错误必须让路给自修复 —— 这里以前是把它吃掉的】
+				// 本块(112 行起)在文件里排在自修复 IIFE(218 行起)**之前**,而属性式 onerror 与
+				// addEventListener 按注册顺序执行 → 这个处理器先跑,而它最后那句 alert() 是**同步阻塞**的:
+				// 线程停在弹窗上,自修复的 error 监听器根本轮不到、或轮到时页面早已废掉。
+				// 结果就是 02331f7 那套自修复形同虚设:用户从未见过「正在自动修复」的提示,只见到
+				// 「SyntaxError: importing binding name 'c' is not found」的技术报错,而且联网也救不回来
+				// (SW 认为自己版本一致,压根不去网络)。ce6634a 当时只考虑了 noname/util/error.ts 会重新
+				// 赋值 window.onerror,漏了 index.html 自己这一个更早、且带 alert 的处理器。
+				// 【为什么此处一定能调到 __pwaRepair】内联脚本同步按序执行完毕,而模块 entry.ts 在文件
+				// 末尾(423 行)才加载 —— 任何模块链接错误发生时,自修复那块早已执行、函数已挂上 window。
+				// 判据与自修复内部的 looksMixed 保持一致(WebKit 与 V8 两种措辞都要覆盖)。
+				if (/importing binding name|indirectly exported binding name|does not provide an export/i.test(msgStr) && typeof window.__pwaRepair === "function") {
+					console.warn("[缓存混版] 交给自修复处理:", msgStr);
+					window.__pwaRepair();
+					return;
+				}
 				let str = `错误文件: ${typeof src == "string" && src.length > 0 ? decodeURI(src) : "未知文件"}`;
 				str += `\n错误信息: ${msg}`;
 				str += `\n行号: ${line}`;
@@ -147,6 +163,15 @@
 			window.onunhandledrejection = async event => {
 				event.promise.catch(error => {
 					console.log(error);
+					// 同上:模块混版错误让路给自修复。启动后动态 import 的 chunk(sdp.js/index4.js 等)
+					// 混搭时,失败形态是 unhandledrejection 而不是 error —— ce6634a 特意为此加了
+					// unhandledrejection 监听,但同样被这个更早的属性处理器抢在前面。
+					var m = String((error && error.message) || error || "");
+					if (/importing binding name|indirectly exported binding name|does not provide an export/i.test(m) && typeof window.__pwaRepair === "function") {
+						console.warn("[缓存混版] 交给自修复处理:", m);
+						window.__pwaRepair();
+						return;
+					}
 					// 如果`error`是个错误，则继续处理
 					if (error instanceof Error) {
 						// 如果已经处理过该错误，则不再处理
@@ -373,7 +398,11 @@
 			}
 
 			// 手动入口:控制台里跑 __pwaRepair() 也能修(自动触发没赶上时的兜底)
-			window.__pwaRepair = function () {
+			// 【防循环守卫下移到这里】上面那两个属性式处理器(onerror/onunhandledrejection,112 行起的块)
+			// 也会调本函数,它们不经过 onMixed,故守卫不能只放在 onMixed 里,否则会 repair → reload →
+			// 又报错 → 又 repair 无限循环。手动从控制台调时可传 true 强制执行(绕过守卫)。
+			window.__pwaRepair = function (force) {
+				if (!force && (alreadyTried || running)) return;
 				return repair().catch(function (e) {
 					hideTip();
 					alert("缓存修复未完成:" + (e && e.message ? e.message : e) + "\n请确认联网后重新打开。");
@@ -383,14 +412,16 @@
 			// 这一轮已经修过了(hash 上有标记):不再重修,把原始报错照常弹出来,免得掩盖真问题。
 			var alreadyTried = location.hash.indexOf(MARK) !== -1;
 			if (alreadyTried) {
-				// 撑过 20 秒没再报模块错 = 修复生效了,把标记摘掉(否则它会一直挡着以后真正需要的修复)
-				setTimeout(function () {
-					if (location.hash.indexOf(MARK) !== -1) {
-						try {
-							history.replaceState(null, "", location.pathname + location.search);
-						} catch (e) {}
-					}
-				}, 20000);
+				// 【标记必须立刻摘掉,不能等 20 秒】原来是撑过 20s 没再报错才摘,想的是"确认修好了再放行"。
+				// 但真实故障下报错在启动瞬间就发生,用户看完弹窗就退出/重开,那 20 秒永远走不完 ——
+				// 于是 __pwafixed 永久钉在 hash 上,自修复此后**一次都不会再触发**,变成死锁:
+				// 修过一次(哪怕没修成)就再也修不了了。这正是"说好了有自修复却仍旧报同一个错"的原因。
+				// 改成立刻摘:防循环的职责交给内存里的 alreadyTried —— 本次加载不再修(避免 repair →
+				// reload → 又报错 → 又 repair 的无限循环),但用户下次主动打开时可以再试一次。
+				// 于是最坏情况是"每次手动打开尝试修一次",而不是"永久放弃"。
+				try {
+					history.replaceState(null, "", location.pathname + location.search);
+				} catch (e) {}
 			}
 
 			// 【触发点必须用 addEventListener,不能包 window.onerror】
