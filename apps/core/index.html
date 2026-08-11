@@ -266,7 +266,9 @@
 
 			var FIX_PARAM = "__pwafix";
 			var MARK = "__pwafixed";
-			var CACHE = "noname-pwa-v2";
+			// 代码桶(与 pwa-sw.js 的 CODE_CACHE 一致)。素材桶 noname-pwa-v2 这里压根不开 ——
+			// 修复只灌代码,而拆桶后素材也不在同一个桶里了。
+			var CACHE = "noname-code-v1";
 			// 只重灌代码文件。立绘/语音(约 1GB)一个都不碰,更不清空缓存 —— 用户不该为一次构建事故重下素材。
 			var CODE_EXT = /\.(js|mjs|ts|css|html|json|webmanifest)$/i;
 			var running = false;

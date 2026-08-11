@@ -117,18 +117,11 @@ console.log("生成 PWA 资源清单");
 	for (const f of await listAssets("font")) {
 		if (/\/(suits|motoyamaru)\.woff2$/.test(f)) core.add(f);
 	}
-	// 【PWA 图标必须进核心】整个 image/ 目录本来都划给「下载离线资源」,于是核心清单里
-	// image/ 开头的文件数是 0。但这几张图不是游戏代码去 fetch 的,是**浏览器自己**按
-	// index.html 的 <link rel="icon"> 和 manifest.webmanifest 的 icons 去拉的 ——
-	// 不管用户有没有点过「下载离线资源」,每次冷启动都要,而且 standalone 启动图标也用它。
-	// 实测 12 次冷启动 12 次都打网络:在线白费两个往返,离线要各等满 missTimeoutMs。
-	// 三张加起来才几十 KB,进核心的代价可以忽略。
-	// 根目录那两张(dist/icon-192.png、dist/apple-touch-icon.png,是 index.html 第 135~136 行
-	// 引的另一套路径)同理:文件确实存在,只是上面"补根目录散文件"那段只挑 .js/.ts,把图漏了。
-	for (const f of await listAssets("image/pwa")) core.add(f);
-	for (const f of ["./icon-192.png", "./apple-touch-icon.png"]) {
-		if (existsSync(path.join("dist", f.slice(2)))) core.add(f);
-	}
+	// 【PWA 图标不进核心 —— 71333e1 加进来是白占】当时的理由是"每次冷启动都打网络"。
+	// 但它们**不在 boot 的 await 链上**:浏览器按 <link rel="icon"> / manifest icons 去拉是
+	// 独立于模块加载的旁路,拉不到只是没图标,一毫秒都不耽误启动;而 iOS 主屏图标是安装
+	// 那一刻由系统固化进 SpringBoard 的,压根不读 Cache Storage。
+	// 想离线也有图标的话「下载离线资源」照样会装(它们在 pwa-all-assets.json 里)。
 
 	// 【启动路径上的小素材也进核心】实测 20 轮冷启动,这几张每轮必现(19~20/20):
 	// ol_bg.jpg 是主菜单背景、handcard/tiesuo_mark 是卡牌 UI 框、splash/style1/* 是 11 张
@@ -159,7 +152,15 @@ console.log("生成 PWA 资源清单");
 		if (!core.has(f) && NOT_CORE.some(re => re.test(f))) heavy.push(f);
 	}
 
-	const coreList = [...core].sort();
+	// 【index.html 必须排在第一位】install 是 BATCH=50 严格串行下载的,而 .sort() 之后
+	// "./index.html" 落在第 280 项(第 6 批)—— 前面压着 17MB。install 在手机弱网上被掐断
+	// 是常态,掐在第 6 批之前就等于这一版的新首页压根没装上,而"启动就报错"这类故障恰恰
+	// 要靠 index.html 里的自修复来救 → 修复代码永远到不了用户手里。故把它拎到最前面。
+	// 【清单必须收录自己】pwa-core-assets.json 原来不在自己的清单里,于是 install 的 catch
+	// 分支里 cache.match("./pwa-core-assets.json") 对"从没点过下载离线资源"的用户恒为 null
+	// → BUILD_KEY 和 STALE_KEY 双双被删 → 全部代码文件永久 Network-First(首屏 1381→4231ms),
+	// 而且不自愈(戳只有下次 install 完整成功才补得回来)。
+	const coreList = ["./index.html", ...[...core].sort().filter(f => f !== "./index.html"), "./pwa-core-assets.json"];
 	await fs.writeFile("dist/pwa-core-assets.json", JSON.stringify(coreList));
 	await fs.writeFile("dist/pwa-all-assets.json", JSON.stringify(heavy.sort()));
 	console.log(`  核心预缓存清单: ${coreList.length} 文件`);

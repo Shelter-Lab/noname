@@ -14,9 +14,34 @@
 // → 「检查更新」永远弹"已是最新版本",用户没有任何主动更新手段。
 const BUILD = "__BUILD_STAMP__";
 
-// 桶名保持固定,**不带构建戳**:带戳等于每次部署换新桶,用户辛苦下的 1GB 立绘/语音
-// 全部作废重下,代价远大于收益。版本一致性用下面的"代码文件原子换版"解决。
-const CACHE = "noname-pwa-v2";
+// —— 两个桶:代码一个小桶,素材一个大桶 ——
+//
+// 【为什么必须拆】原来代码和 ~14000 个素材挤在同一个桶里。Cache Storage 的每次访问都要
+// 先 caches.open(),而 WebKit 打开一个 Cache 时会把**整份记录表**载进内存 —— 桶里 730 条
+// 和 14993 条的开销差 20 倍,而这全发生在 SW 的单线程上。一次冷启动约 700 个请求,原来
+// 每个 fetch 事件都各自 caches.open() + cache.match() 一遍(见下面 openCode/openAsset 的
+// 记忆化),于是"下载完离线资源"之后启动稳定多花 4~5 秒。
+// 三条实测都只有这一个解释能同时对上:
+//   · 总时长在重新缓存后不变      → 瓶颈不是字节,不在下载
+//   · 在线 ≈ 离线                 → 瓶颈不是网络
+//   · 只有全量缓存态慢,核心态快   → 唯一变量就是桶里的条目数
+// 这与 TROUBLESHOOTING 第 3 节记的「逐个 cache.match 1.4 万次压垮 iOS 主线程」是同一个病,
+// 当时只修了下载器那一半(改成 cache.keys() 批量比对),启动读取这一半一直没动。
+//
+// 【素材桶为什么沿用旧名】换名等于用户下过的 1GB 立绘/语音全部作废重下。代码桶是新名,
+// 用户只重下约 27MB 代码,素材一个字节都不碰。
+// 【旧桶里那份代码副本不清】它现在是约 27MB 死重,但启动路径已经不查它了,而 633 次
+// cache.delete 打在 14993 条的大桶上本身就是一次昂贵操作 —— 省下来的收益抵不上风险。
+const CODE_CACHE = "noname-code-v1";
+const ASSET_CACHE = "noname-pwa-v2";
+
+// 【记忆化 caches.open:一次 SW 生命周期只开一次,不是每个请求开一次】
+// 原来三处分支(导航 / 清单 / 主分支)各自 `await caches.open(CACHE)`,等于每个 fetch 事件
+// 都开一遍。open 本身不是零成本(见上),700 次 × 大桶 = 纯浪费。
+let codeCachePromise = null;
+let assetCachePromise = null;
+const openCode = () => (codeCachePromise ||= caches.open(CODE_CACHE));
+const openAsset = () => (assetCachePromise ||= caches.open(ASSET_CACHE));
 
 // 缓存里记录"这批代码是哪个构建的"用的 key(不是真实资源,只存一个戳)
 const BUILD_KEY = "/__pwa_build__";
@@ -170,7 +195,12 @@ self.addEventListener("install", event => {
 				const resp = await fetch("./pwa-core-assets.json", { cache: "no-cache" });
 				if (!resp.ok) throw new Error("核心清单获取失败 " + resp.status);
 				const list = await resp.json();
-				const cache = await caches.open(CACHE);
+				// 核心清单里绝大多数是代码,但也夹着少量启动路径上的小素材(splash/图标/ol_bg/
+				// 卡牌框/基础字体)。按 isCodeAsset 分流写进对应的桶 —— 判据必须和 fetch 读取端
+				// 完全一致,否则写进 A 桶、从 B 桶找,等于没缓存。
+				const codeCache = await openCode();
+				const assetCache = await openAsset();
+				const cacheFor = url => (isCodeAsset(new URL(url, self.location.href).pathname) ? codeCache : assetCache);
 				// 分批下载,避免一次性数百请求压垮 iOS;单批失败不影响其余。
 				// 用 fetch+sanitize 而非 cache.add,以便洗白重定向响应(iOS 不接受 redirected 缓存)。
 				// cache:"reload" 绕开浏览器 HTTP 缓存,确保拿到的是当前构建的真实内容而不是
@@ -185,6 +215,7 @@ self.addEventListener("install", event => {
 						batch.map(async url => {
 							const r = await fetch(url, { cache: "reload" });
 							if (r && r.status === 200) {
+								const cache = cacheFor(url);
 								const clean = await sanitizeResponse(r.clone());
 								await cache.put(url, clean);
 								// 【首页必须把导航分支的每个读取 key 都写一遍】
@@ -217,6 +248,7 @@ self.addEventListener("install", event => {
 						missed.map(async url => {
 							const r = await fetch(url, { cache: "reload" });
 							if (r && r.status === 200) {
+								const cache = cacheFor(url);
 								await cache.put(url, await sanitizeResponse(r.clone()));
 								// 同上:首页要把导航分支的每个读取 key 都写一遍
 								if (/index\.html$/.test(url)) {
@@ -238,12 +270,13 @@ self.addEventListener("install", event => {
 				// 装齐了 → 记下构建戳,fetch 分支对代码文件走原来的 SWR(启动速度完全不变)。
 				// 没装齐 → 只把「缺的那几个」记进 STALE_KEY,而不是让全部 622 个代码文件都走
 				// 网络。这样最坏情况的代价正比于真实缺失量,不会因为一个文件失败就整体降级。
-				await cache.put(BUILD_KEY, new Response(BUILD, { headers: { "Content-Type": "text/plain" } }));
+				// 两个 key 只描述"代码这一批是哪个构建的",归代码桶(getCodeState 也从代码桶读)
+				await codeCache.put(BUILD_KEY, new Response(BUILD, { headers: { "Content-Type": "text/plain" } }));
 				if (missed.length) {
-					await cache.put(STALE_KEY, new Response(JSON.stringify(missed), { headers: { "Content-Type": "application/json" } }));
+					await codeCache.put(STALE_KEY, new Response(JSON.stringify(missed), { headers: { "Content-Type": "application/json" } }));
 					console.warn(`[pwa-sw] 核心预缓存 ${ok}/${list.length},仍缺 ${missed.length} 个,这些将走 Network-First`);
 				} else {
-					await cache.delete(STALE_KEY);
+					await codeCache.delete(STALE_KEY);
 					console.log(`[pwa-sw] 核心已整版就绪 build=${BUILD}(${ok}/${list.length})`);
 				}
 				// 【必须失效内存缓存】getCodeState 只查一次 Cache Storage。install 期间若已有
@@ -271,10 +304,16 @@ self.addEventListener("install", event => {
 				// 拿不到清单时退化成"全部都算 stale",与旧行为等价,不会更差。
 				console.warn("[pwa-sw] 核心预缓存未完成:", e);
 				try {
-					const cache = await caches.open(CACHE);
+					const cache = await openCode();
 					let all = [];
 					try {
-						const r = await cache.match("./pwa-core-assets.json");
+						// 【清单存在两个桶都要找】pwa-core-assets.json 走的是 Network-First 分支,
+						// 由那里写进代码桶;而它自己**不在**核心清单里(build.ts 不收录自身),
+						// 所以从没点过「下载离线资源」、且这次 install 又拿不到清单的用户,这里
+						// 一定读到 null → 走下面的 else 把两个 key 全删 → 全部代码文件永久
+						// Network-First(就是注释里那个首屏 1381ms→4231ms 的退化),而且**不自愈**。
+						// 兜底再查素材桶:老版本 SW 可能把它写在那儿。
+						const r = (await cache.match("./pwa-core-assets.json")) || (await cache.match("/pwa-core-assets.json")) || (await (await openAsset()).match("./pwa-core-assets.json"));
 						if (r) all = await r.json();
 					} catch {
 						/* 清单读不到就留空 */
@@ -306,9 +345,10 @@ self.addEventListener("message", event => {
 self.addEventListener("activate", event => {
 	event.waitUntil(
 		(async () => {
-			// 清理旧版本缓存
+			// 清理旧版本缓存。【两个桶都必须放行】漏掉 ASSET_CACHE 会把用户下过的 1GB
+			// 立绘/语音直接删掉;漏掉 CODE_CACHE 则每次 activate 把刚装好的代码删光 → 白屏。
 			const keys = await caches.keys();
-			await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
+			await Promise.all(keys.filter(k => k !== CODE_CACHE && k !== ASSET_CACHE).map(k => caches.delete(k)));
 			await self.clients.claim();
 		})()
 	);
@@ -323,7 +363,7 @@ function getCodeState() {
 	if (!codeStatePromise) {
 		codeStatePromise = (async () => {
 			try {
-				const cache = await caches.open(CACHE);
+				const cache = await openCode();
 				const rec = await cache.match(BUILD_KEY);
 				if (!rec || (await rec.text()) !== BUILD) return { fresh: false, stale: null };
 				const staleRec = await cache.match(STALE_KEY);
@@ -360,7 +400,7 @@ function noteStaleResolved(pathname) {
 		staleFlushTimer = setTimeout(async () => {
 			staleFlushTimer = null;
 			try {
-				const cache = await caches.open(CACHE);
+				const cache = await openCode();
 				const cur = await getCodeState();
 				if (!cur.fresh || !cur.stale) return;
 				if (cur.stale.size) {
@@ -391,12 +431,20 @@ self.addEventListener("fetch", event => {
 	if (req.mode === "navigate") {
 		event.respondWith(
 			(async () => {
-				const cache = await caches.open(CACHE);
+				// index.html 属代码,放代码桶。但**必须兜底查一次旧的素材桶**:老用户升到这一版时,
+				// 唯一那份首页还躺在旧桶里,新代码桶要等 install 装完才有 —— 中间那一瞬若读不到首页,
+				// 离线打开就直接 504 白屏。旧桶只在新桶没命中时才查,装齐后这一路永远不走。
+				const cache = await openCode();
 				// 多 key 尝试:缓存里 URL 可能是 /、/index.html、./index.html 中的任一种
-				const cached = await cache.match(req)
-					|| await cache.match("/")
-					|| await cache.match("/index.html")
-					|| await cache.match("./index.html");
+				const cached =
+					(await cache.match(req)) ||
+					(await cache.match("/")) ||
+					(await cache.match("/index.html")) ||
+					(await cache.match("./index.html")) ||
+					(await (async () => {
+						const old = await openAsset();
+						return (await old.match(req)) || (await old.match("/")) || (await old.match("/index.html")) || (await old.match("./index.html"));
+					})());
 
 				// 后台静默网络更新(fetchSafe 带超时,Safari 断网不会永久挂)
 				// 【必须把上面每个读取 key 都写一遍 —— 只写 req 等于永远读不到新首页】
@@ -465,7 +513,9 @@ self.addEventListener("fetch", event => {
 	if (url.pathname.endsWith("/pwa-version.json") || url.pathname.endsWith("/pwa-all-assets.json") || url.pathname.endsWith("/pwa-core-assets.json")) {
 		event.respondWith(
 			(async () => {
-				const cache = await caches.open(CACHE);
+				// 清单/版本戳是 .json,isCodeAsset 判它为代码 → 放代码桶,与读取端一致。
+				// 离线兜底再查一次旧素材桶:老用户升级前这几个文件躺在那儿。
+				const cache = await openCode();
 				try {
 					const resp = await fetchSafe(req);
 					if (resp && resp.status === 200) {
@@ -474,7 +524,7 @@ self.addEventListener("fetch", event => {
 					}
 					return await sanitizeResponse(resp);
 				} catch {
-					const cached = await cache.match(req);
+					const cached = (await cache.match(req)) || (await (await openAsset()).match(req));
 					if (cached) return cached;
 					// 离线且无缓存:兜底体必须与消费方期待的类型一致 ——
 					// 清单是数组(下载器 `[...new Set([...coreList, ...allList])]` 展开,给对象会抛 not iterable),
@@ -489,8 +539,16 @@ self.addEventListener("fetch", event => {
 
 	event.respondWith(
 		(async () => {
-			const cache = await caches.open(CACHE);
-			const cached = await cache.match(req);
+			// 【这一行就是"下载完离线资源后启动慢 4~5 秒"的根】原来无论请求什么都去开那个
+			// 代码+14000 素材混装的大桶,再在里面 match 一次。启动约 700 个请求,每个都这么来
+			// 一遍 —— 桶里 730 条时快,14993 条时慢,而这全排在 SW 的单线程上。
+			// 现在:代码请求只碰 ~633 条的代码桶,素材请求才碰大桶;而素材是图片/音频,
+			// 不在 boot 的 await 链上,慢一点不阻塞启动。
+			const isCode = isCodeAsset(url.pathname);
+			const cache = isCode ? await openCode() : await openAsset();
+			// 【代码要兜底查一次旧桶】老用户升到这一版时代码桶还是空的(要等 install 装完)。
+			// 这一瞬若离线,读不到就白屏。装齐后 cache.match 先命中,这一路不再走。
+			const cached = (await cache.match(req)) || (isCode ? await (await openAsset()).match(req) : null);
 
 			// 代码文件且缓存不是当前构建的 → 缓存里可能是跨版本混搭的 chunk,不能信。
 			// 走 Network-First 现取现用(取到就写回),只有网络失败才退回旧缓存。
@@ -501,7 +559,7 @@ self.addEventListener("fetch", event => {
 			// 【豁免下载器】下载器的请求带 cache:"no-cache",它只是在批量填缓存、不执行模块,
 			// 不存在跨版本绑定问题;而这里的超时会掐断慢网下的批量补课(missTimeoutMs 特意
 			// 对它返回 0 就是为了不超时),必须放它走原路。
-			const codeNeedsNetwork = req.cache !== "no-cache" && isCodeAsset(url.pathname) && !looksOffline() && (await codeNeedsFreshFetch(url.pathname));
+			const codeNeedsNetwork = req.cache !== "no-cache" && isCode && !looksOffline() && (await codeNeedsFreshFetch(url.pathname));
 			if (codeNeedsNetwork) {
 				try {
 					const resp = await fetchSafe(req, undefined, missTimeoutMs(req));
@@ -542,7 +600,7 @@ self.addEventListener("fetch", event => {
 				// 换版时变,换版必然有 install、install 必然在线 —— 跟着 install 开一次窗就够了。
 				// 【为什么不能靠 looksOffline 兜】它要连续失败 3 次才判离线,前 3 个素材照样各等满
 				// 超时;而且 ALWAYS_404 短路后那几个请求不再产生失败计数,streak 更涨不上去。
-				if (assetRevalidateWindow && !looksOffline() && !isCodeAsset(url.pathname)) {
+				if (assetRevalidateWindow && !looksOffline() && !isCode) {
 					fetchSafe(req)
 						.then(async resp => {
 							noteNetResult(true);

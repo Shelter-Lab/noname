@@ -52,13 +52,28 @@ export class LibInit {
 			const allList = await allResp.json();
 			/** @type {string[]} */
 			const all = [...new Set([...coreList, ...allList])];
-			// 缓存桶名须与 pwa-sw.js 的 CACHE 一致,否则下载的内容 SW 读不到
-			const cache = await caches.open("noname-pwa-v2");
+			// 【两个桶,桶名与判据都必须与 pwa-sw.js 严格一致】代码进小桶、素材进大桶,
+			// 否则下载的内容 SW 从另一个桶找、等于没缓存。
+			// 拆桶的原因见 pwa-sw.js 头部:单桶混装 14000+ 条时,启动路径每个请求的
+			// caches.open + cache.match 都要在这么大的桶上走一遍,把 SW 单线程堵死。
+			const codeCache = await caches.open("noname-code-v1");
+			const assetCache = await caches.open("noname-pwa-v2");
+			const CODE_EXT = /\.(js|mjs|ts|css|html|json|webmanifest)$/i;
+			const CODE_DIRS = ["noname", "_virtual", "node_modules", "layout", "theme", "game", "mode", "card", "character"];
+			const isCodeAsset = pathname => {
+				if (!CODE_EXT.test(pathname)) return false;
+				const rel = pathname.replace(/^\/+/, "");
+				const slash = rel.indexOf("/");
+				if (slash === -1) return true; // 根目录散文件
+				return CODE_DIRS.includes(rel.slice(0, slash));
+			};
+			const cacheFor = url => (isCodeAsset(new URL(url, location.href).pathname) ? codeCache : assetCache);
 
 			// 计算待下载(跳过已缓存)以支持续传。
 			// 用 cache.keys() 一次性取全部已缓存 URL 做成 Set 再比对——
 			// 避免逐个 await cache.match(1.4万次)的密集查询把 iOS 主线程搞崩(下载完再点会白屏)。
-			const cachedKeys = await cache.keys();
+			// 【两个桶的 key 要合起来算】否则代码那 600 多个会被判成"未缓存"每次重下。
+			const cachedKeys = [...(await codeCache.keys()), ...(await assetCache.keys())];
 			const cachedSet = new Set(cachedKeys.map(r => new URL(r.url).pathname));
 			const pending = all.filter(url => {
 				// 清单里是 "./image/x.png",缓存 key 是完整 URL,统一用 pathname 比对
@@ -94,7 +109,7 @@ export class LibInit {
 								const body = await r.clone().blob();
 								toCache = new Response(body, { status: r.status, statusText: r.statusText, headers: r.headers });
 							}
-							await cache.put(url, toCache);
+							await cacheFor(url).put(url, toCache);
 						}
 					})
 				);
