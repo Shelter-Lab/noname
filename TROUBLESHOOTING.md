@@ -29,7 +29,8 @@
    (`grep -c` 会数出 243:多的那个是 dist/index.html:12 的**内联** JIT 引导块,首行 `if (!LOCAL_HOSTS.includes(location.hostname)) return;`,线上恒为 no-op、不发请求。)
 5. **【最关键的判据】能不能怪"缺文件"?看看门狗响没响**。看门狗在 boot 内部(`init/index.ts:30`)才 arm,所以**它一响就说明整个模块图 link 成功了**。而 miss 是**毫秒级快失败**(4s 上限 + `Response.error()`),解释不了"要等到 30s"。
    → 于是"卡 30 秒/1 分钟"必然是 **boot 内部某个 `await` 挂住了**,而不是资源缺失。查白屏先按这个岔路分流,能省掉大半弯路。
-6. **`<script src="vue">` 这三个标签本来就 404,在线也一样**(dist/index.html:440/462/463)。`src` 按 URL 解析、**不走 importmap**(importmap 只作用于模块内的 import specifier),故解析成 `/vue` → 线上实测 404。游戏照常跑 = 它们是无害的死标签,**别把它们当白屏线索**。
+6. **`<script src="vue">` 这三个标签本来就 404,在线也一样**(dist/index.html:440/462/463)。`src` 按 URL 解析、**不走 importmap**(importmap 只作用于模块内的 import specifier),故解析成 `/vue` → 线上实测 404。游戏照常跑 = 它们**不是白屏线索**(别拿它们当报错的根因去查)。
+   **但"不是白屏线索"≠"无害"** —— 这条 2026-08-11 修正过一次:在线它们只各浪费一个 404 往返(几十毫秒,确实无感),**离线时每个都要等满 `missTimeoutMs` 的 4 秒,而且串在 boot 的 await 链上**,是离线白屏十几秒的主要来源。现已由 SW 的 `ALWAYS_404` 短路(见第六节)。教训:**"在线看不出问题"和"离线看不出问题"是两个独立结论,不能互推**。
 
 | 现象 | 根因 | 修法 |
 |---|---|---|
@@ -113,7 +114,8 @@
   导航走 Network-First 就是 WebKit 断网白屏(见上「历史横跳教训」第一条)。清单能用是三个条件同时成立:
   ①调用频率极低(只在点「下载离线资源」和 SW install 时)②体积小有 2s 超时兜底 ③有缓存 fallback
 - **缓存桶名恒为 `noname-pwa-v2`,activate 只删非当前桶**;改文件名/桶名会让"换版部署离线可用"风险剧增
-- **新增任何"绕过 SW"的请求(非 GET / 跨域 / iframe 子请求)必须自带 `AbortController` 超时** —— SW 的超时兜底对它们无效。这是本项目重复踩了两次的同一类坑(沙盒 iframe、HEAD 探测)
+- **新增任何"绕过 SW"的请求(非 GET / 跨域 / iframe 子请求)必须自带 `AbortController` 超时** —— SW 的超时兜底对它们无效。这是本项目重复踩了**三次**的同一类坑(沙盒 iframe、HEAD 探测、`ALWAYS_404` 必须放在 `method !== "GET"` 之前)
+- **`ALWAYS_404` 只许放"线上结构性不存在"的路径**,且必须放在 `req.method !== "GET"` 判断**之前**(见第五节)。往里加东西前先确认那个路径**永远**不会有文件 —— 加错了就是把真实资源挡死,而且离线时查不出来
 
 ### 其它 iOS 认知(实测纠正过的)
 - **独立主屏 PWA 缓存稳定,不会被 iOS 乱清**(早先"7天清理/内存驱逐"说法对主屏 PWA 不成立)
@@ -134,10 +136,25 @@
 | **产物更新后"下载离线资源"仍显示旧总数(如清单已 14294 却仍报 14993)** | 两个清单 json 走**默认 SWR 分支** → 命中旧缓存秒返回,新清单只在后台更新、下次打开才生效。下载器虽写了 `cache:"no-cache"`,但那**只约束浏览器 HTTP 缓存,请求照样进 SW 被 Cache Storage 拦下** —— SW 里 `no-cache` 仅用于 `missTimeoutMs` 豁免超时,从不用来跳过缓存。**危害不只是数字难看:按旧清单下载会漏掉新增素材**(新补的立绘照样是剪影) | `pwa-sw.js` 把两个 `*-assets.json` 和 `pwa-version.json` 一起走 **Network-First**。清单 gzip 后仅 57KB / 实测 0.14s,`fetchSafe` 默认 2s 超时余量 14 倍,超时/离线 fallback 缓存。**另:离线兜底体必须按类型分流** —— 清单给 `[]`,`pwa-version.json` 给 `{}`;原先统一给 `{}` 会让下载器 `[...new Set([...coreList, ...allList])]` 抛 not iterable |
 | **进度条虚报"下载完成 N/N"(潜在隐患,尚未发作)** | `downloadOfflineAssets` 批处理里只有 `if (r.status === 200)` 才 `cache.put`,但**非 200 也正常 resolve** → `allSettled` 判 `fulfilled` → `done++`。即"计数涨了但缓存里没东西" | 实测当前清单**无 404**(890 个非 ASCII 路径经 `fetch` 自动编码后都是 200),故暂未发作。若哪天清单与产物脱节(上游删文件而清单未更新)就会悄悄骗人。修法:非 200 抛错,或单独计失败数并在结尾提示 |
 
-**清单口径别搞混**:`pwa-core-assets.json` = **709**(SW install 预缓存,启动+标准局必需);
-`pwa-all-assets.json` = **14284**(核心之外的大素材)。两者**交集 0**,合计 **14993** —— 
-下载器核对的是**合并清单**,所以界面显示的总数是 14993,不是 14284。core 排在合并数组前面,
+**清单口径别搞混**:`pwa-core-assets.json` = **716**(SW install 预缓存,启动+标准局必需,29.9MB);
+`pwa-all-assets.json` = **14364**(核心之外的大素材)。两者**交集 0** —— 
+下载器核对的是**合并清单**,所以界面显示的总数是两者之和(15080),不是 14364。core 排在合并数组前面,
 故按钮下载时**核心优先**(且它们通常已被 SW 预缓存过,直接算已完成)。
+
+**核心清单的收录判据(2026-08-11 校准,别再凭直觉加减)**:进核心的唯一标准是
+**「冷启动路径上一定会被请求」**,不是「重要」也不是「小」。清单越大,install 那次
+`cache:"reload"` 全量重下在手机弱网上被掐断的概率越高,而掐断会落进「缓存装着却不被信任」
+(见第六节),代价远大于少缓存几个文件。
+- **剔出去过的**:`service-worker.js`(4.1MB,JIT 编译器的 SW —— `packages/jit/src/entry.ts` 开头
+  就按 hostname 拦住,非 localhost 直接 return,**线上永不注册、永不请求**)、
+  `eslint-linter-browserify`(3.1MB,`ui/create/index.js:232` 是 `await import()`,只有真打开
+  编辑器编 JS 才加载)、`game/vue.esm-browser.js`(上游废弃兼容层,本体一处都不 import)。
+  它们仍在 `pwa-all-assets.json` 里,「下载离线资源」照样装,想全离线的不会少拿东西。
+- **补进去过的**:`image/pwa/*.png` + 根目录 `icon-192.png`/`apple-touch-icon.png`。
+  **踩点在这**:整个 `image/` 目录本来都划给「下载离线资源」,于是核心清单里 `image/` 开头的
+  文件数是 **0**。但这几张图不是游戏代码 fetch 的,是**浏览器自己**按 `<link rel="icon">` 和
+  `manifest.icons` 去拉的 —— 不管用户点没点过下载,每次冷启动都要,standalone 启动图标也用它。
+  实测 12 次冷启动 12 次都打网络。**判据是"谁发起这个请求",游戏代码之外还有浏览器自己。**
 
 **CF 文件数上限**:Workers Static Assets 限 **20000 个文件**(单文件 25MiB)。当前 dist = **15356**
 (audio 9380、image 4044、extension 854),余量约 4600。真撞墙时按此优先级处置:
@@ -158,6 +175,122 @@
 
 ---
 
+## 五、冷启动变慢(2026-08-11)—— 在线烧带宽、离线烧超时,是两个病
+
+**症状是一个**:冷启动(关掉 standalone PWA 再开)从 7~8 秒变 15 秒,**在线和离线一样慢**。
+**病因是两个,机制完全不同**。这一点非常反直觉,查的时候差点用一个解释套住两边 ——
+「在线要重下 35MB」解释得了在线,但**离线一个字节都不下载,那条解释在离线场景下根本不成立**。
+先记住这个分流判据:
+
+> **在线慢 = 吞吐问题(下了多少字节)。离线慢 = 延迟问题(等了多少个超时)。**
+> 如果在线和离线耗时**差不多**,瓶颈就一定不在吞吐 —— 因为离线不下载,却没有变快。
+
+### 病因一(在线):install 失败时删构建戳,是粘住不自愈的性能悬崖
+
+`pwa-sw.js` install 的 catch 分支原来会 `c.delete(BUILD_KEY)`,想法是"缓存来路不明,宁可慢也不能白屏"。
+代价被严重低估了:`getCodeState()` 返回 `fresh:false` → `codeNeedsFreshFetch()` 对**每个**代码文件
+都返回 true → **缓存里明明装着 625 个文件一个不少,SW 也全部绕开它去联网重取**。
+
+实测(持久化 profile、真关浏览器再开、同一份完整缓存,**只差这一个戳**):
+
+| | 首屏 | 打到网络的请求 | 流量 |
+|---|---|---|---|
+| 戳在 | 1381ms | 135 个 | 4.6MB |
+| **戳丢** | **4231ms** | **462 个** | **35.2MB** |
+
+桌面千兆就 3 倍,手机 4G 上就是 7~8 秒变 15 秒。**更糟的是它不自愈**:戳只有下次 install
+完整成功才补得回来,而 install 只在 `pwa-sw.js` 字节变化(= 又部署一版)时才跑 —— 中间每次
+冷启动都在白烧几十 MB。而「手机弱网下 33MB 全量 reload 被掐断」恰恰是常态,不是罕见分支。
+
+**修法**:戳保留,把整份清单记进 `STALE_KEY`(`codeNeedsFreshFetch` 本来就有 `st.stale.has()`
+这条路,只是这个 catch 分支以前没走它)。语义不变(该走网络的照样走),但它**可收敛**:
+`noteStaleResolved()` 让 fetch 每从网络取到一个就把它划掉,启动一次比一次快;全部补齐就删名单,
+回到纯缓存启动。**删戳是不可收敛的,永远从头再来。**
+
+- **名单必须落盘,不能只存内存** —— SW 进程空闲几十秒就被回收,内存里的 Set 一起没了,
+  那就退化成旧的删戳行为了。(这**不违反**「不用跨重启存活的状态标记」那条:那条针对的是
+  "正在下载"这类丢了就误判的 flag;这里丢了最多是多走几次网络,正确性不受影响。)
+- 攒 3 秒合并写一次,别每划掉一个就 `cache.put` 一遍 JSON —— 单线程 SW 会被写缓存堵死,反而更慢。
+
+**★ 教训:缓存完整 ≠ SW 会用它。** 排查"明明缓存好了怎么还慢"时,**先查 SW 信不信这份缓存**,
+再查缓存里有没有东西。这个状态以前在界面上完全看不出来(版本号显示得好好的、报"已是最新"),
+所以「检查更新」按钮现在会体检 `/__pwa_build__` 并如实报出来,不用再靠猜。
+
+### 病因二(离线):四个必然 404 的请求,串在 boot 的 await 链上各等 4 秒
+
+实测 12 次冷启动,这四个 **100% 出现、100% 失败**:
+
+| 请求 | 为什么永远 404 |
+|---|---|
+| `/vue` | `game/vue.esm-browser.js` 是上游废弃兼容层(`export * from "vue"`),裸说明符只有主文档 importmap 认得,别的上下文解析就退化成 `/vue` |
+| `/preload.js` | `entry.ts:14` 的 `await import("/preload.js")` 是**故意**要它失败的 —— catch 里才分派 browser/cordova/node 平台入口,文件永远不存在 |
+| `/noname.config.txt` | `init/index.ts:843` 探测有没有导入配置,**没有才是常态** |
+| `/theme/style/card` | `library/index.js:2463` 的 `lib.init.css(assetURL+"theme/style/card", ...)` 拼出来指向的是**目录**不是文件 |
+
+在线各浪费一个 404 往返(几十毫秒,无感);**离线每个要等满 `missTimeoutMs` 的 4 秒
+(script/document 档),而且是串行的** —— 它们从 `entry.ts:14` 一路 await 到
+`init/index.ts:843`,前一个不回来后一个不发。4×3 ≈ 12 秒,这就是离线白屏的主要来源。
+
+**`looksOffline()` 兜不住它**:那个要连续失败 3 次才判定离线,而**学费恰好由启动链最前面
+这几个交** —— 等它生效,12 秒已经烧完了。它救的是后面几百个素材请求,救不了最前面这几个。
+
+**修法**:`ALWAYS_404` 列表直接短路返 404,一个网络往返都不发。
+- **必须放在 `req.method !== "GET"` 判断之前** —— `checkFile` 用的是 **HEAD**,本来会被那行
+  放行到网络,连 SW 的超时兜底都吃不到(`browser.js:37` 那 2 秒超时就是为此加的)。
+  这是本项目第三次踩「绕过 SW 的请求」这个坑(前两次:沙盒 iframe、HEAD 探测)。
+- **返 404 而不是 `Response.error()`**:消费方都按"文件不存在"处理(`import()` 靠 catch 分派平台、
+  `checkFile` 靠非 200 返 -1)。也别返带文本 body 的响应 —— 那会被当 JS 模块解析,引出
+  `importing binding name 'c' is not found` 之类的 link 错。
+
+实测改后 19 次冷启动里这四个 **0 次**上网(改前 12/12 必现)。
+
+### ★ 决策记录:为什么至今没给产物加 content hash
+
+**content hash 是什么**:在文件名里嵌内容指纹,`_virtual/aes.js` → `_virtual/aes.a3f9c2d1.js`,
+内容变一个字节名字就变。改动量就是 `apps/core/scripts/build.ts:147-149` 那三行
+`[name].js` → `[name].[hash].js`。
+
+**它能从根上消灭我们所有缓存一致性的麻烦**,因为那些麻烦全部来自**同名不同内容**这一件事:
+`index4.js` 上一版是某模块导出 `{a,b}`,这一版因依赖图漂移成了 crypto-js 导出 `{c}`,而缓存键
+都是 `/index4.js` —— SW 从名字看不出这是两个不同的东西。加了 hash 后,
+`importing binding name 'c' is not found` 在**物理上不可能发生**:名字对不上就直接 miss 走网络,
+新旧两份可以在缓存里共存互不干扰,而且每个文件都能 `Cache-Control: immutable` 永久缓存、连校验都不发。
+
+**于是这一大堆东西会集体失去存在意义**:`BUILD_KEY`、`STALE_KEY`、`getCodeState`、
+`codeNeedsFreshFetch`、`noteStaleResolved`、install 的原子全量 reload、`repair()`、
+「代码文件绝不后台 revalidate」那条规矩 —— **它们全是在补"文件名不可信"这个漏**。
+
+**但现在不做,四个真实阻力**:
+1. **扩展生态会崩** —— 扩展硬编码 `import ... from "../../noname/library/index.js"` 这类路径,
+   文件名带 hash 后全部失效。164 个内置扩展 + 用户自装的都要改。
+2. **上游合并变地狱** —— 这是 fork,动产物命名 = 动整个构建输出结构,以后每次 merge 上游都要重新调和。
+3. **用户要重下一次全部代码**(≈30MB)—— 所有代码文件名都变 = 全部 cache miss。素材不受影响。
+4. **hash 只治代码,不治素材** —— `image/character/xxx.jpg` 路径是按武将 ID 拼的,不可能加 hash,
+   所以 SWR 那套还得留着。
+
+**判断**:混搭病已由「install 原子全量换版 + 代码文件绝不后台 revalidate」堵住并稳定(见第二节),
+现在改属于用大代价换已经解决的问题。
+**真正该动手的时机:如果混搭病复发** —— 那说明补丁方案有漏,那时 hash 才值得付上面那四笔代价。
+
+### ★ 顺带回答"这些坑是不是因为用了 PWA"
+
+**一半是,一半不是。**
+
+**PWA 特有的(官方安装包不会有)**:缓存一致性/混搭病、手搓版本协商(「检查更新」改了好几轮)、
+`missTimeoutMs`/`looksOffline`/`fetchSafe` 这一整坨补 WebKit 断网不 reject 的代码、
+iOS 不许 SW 返回 redirected 响应(`sanitizeResponse`)、后台 install 被系统掐断。
+
+**不是 PWA 的错,换装包一样存在的**:`/preload.js` 靠 `import()` 失败分派平台、
+`theme/style/card` 拼出目录路径、废弃的 vue 兼容层 —— 都是上游历史包袱。
+**最根本的是启动链是长串行 await**:十几个请求一个等一个,任何一环变慢总时间直接加上去。
+装包应用读本地文件是微秒级,把这个设计缺陷**掩盖**了,但它一直在那儿。
+
+**选 PWA 仍然是对的**:核心约束是「iOS 上能玩 + 不过商店 + 离线可玩」,这个组合下 PWA 是唯一解
+(iOS 侧个人开发者上架 $99/年 + 审核,而这是 GPL 三国杀同人,过审基本没戏)。
+这些磕绊是那个约束的必要成本,不是路选错了。
+
+---
+
 ## 调试手段
 - 本地纯静态验证:`cd dist && python -m http.server`(无 /checkFile 接口,等效 CF)。跑完停掉服务器,否则锁 dist 导致 build.ts 的 `fs.rm("dist")` 报 EBUSY
 - iOS 主屏 PWA 调试:iPhone 设置→Safari→高级→网页检查器;Mac Safari 开发菜单→选 iPhone→主屏 PWA **单独列出**(独立 origin)。断网后看 Network 标签哪个请求一直 pending = 白屏元凶
@@ -169,9 +302,19 @@
   是 curl 不编码才假 404。踩过一次:据此误判"890 个文件线上缺失",实为自造的假象。
   正确做法:探测前先 `new URL(raw, origin).href` 再喂给 curl
 
+### 测冷启动性能(两条踩过的坑,不照做会量出假数)
+- **别用 `127.0.0.1` 跑 dist** —— `packages/jit/src/entry.ts:6` 的
+  `LOCAL_HOSTS = ["localhost","127.0.0.1","10.0.2.2"]` 会放开 JIT 开发用 SW,它**抢占 scope
+  且每次启动 reload 两遍**。据此量出过"每次冷启动重取 734 个核心文件"的假数。
+  用 **`127.0.0.2`**:仍是安全上下文(SW 能注册),但不在 LOCAL_HOSTS。
+- **必须真关掉整个浏览器再开**(Playwright 用 `launchPersistentContext` + 每轮 `ctx.close()`),
+  开新标签页不算冷启动 —— SW 进程还活着,`getCodeState` 的内存缓存也还在,测不出真实首屏。
+- 想看"每次冷启动到底有多少请求真打到网络",在服务器侧记访问日志最准(SW 命中缓存的请求
+  压根不会出现在日志里,这比在浏览器 Network 面板里筛更干净)。
+
 ---
 
-## 五、同步上游更新后需重新确认的改动清单
+## 六、同步上游更新后需重新确认的改动清单
 
 本 fork 改了若干**官方文件**(不是新增文件)。同步 `libnoname/noname` 上游后,若上游也动了这些文件可能冲突/被覆盖,照此清单逐个核对、被覆盖的补回来:
 
@@ -180,13 +323,14 @@
 | `apps/core/noname/init/browser.js` | ①文件接口退回 URL + IndexedDB(纯静态模式) ②`fetchWithTimeout` + `checkFile` 的 HEAD 探测带 2s 超时(治 standalone 离线卡 60s) | 探测文件服务器 + 读写走 fetch/IndexedDB 还在吗;**HEAD 还带着超时吗** |
 | `apps/core/noname/init/index.ts` | ①启动超时 30s ②`sandboxEnabled` 加 `&& lib.device !== "ios"`(跳沙盒治白屏) | 这两处还在吗 |
 | `apps/core/index.html` | ①localStorage 内存兜底 ②PWA meta/SW 注册 ③onerror 忽略 NotAllowedError ④QUERY_PRECACHE | 这几段内联脚本还在吗 |
-| `apps/core/pwa-sw.js` | (新增文件)缓存策略 + `missTimeoutMs` 超时分档 + `failStreak` 离线启发式 | 上游不会动,但改它前必读本文档「断网白屏根治方案」 |
+| `apps/core/pwa-sw.js` | (新增文件)缓存策略 + `missTimeoutMs` 超时分档 + `failStreak` 离线启发式 + `ALWAYS_404` 短路 + install 失败保戳记 `STALE_KEY` | 上游不会动,但改它前必读本文档「断网白屏根治方案」和第五节 |
+| `apps/core/noname/entry.ts` | 无改动,但 `await import("/preload.js")` 这个**故意失败**的探测被 `ALWAYS_404` 短路了 | 上游若改了平台分派方式(不再靠 import 失败),要同步删掉 `ALWAYS_404` 里的 `/preload.js`,否则会挡住真实文件 |
 | `apps/core/noname/game/index.js` | ①createServer/connect 的 PeerJS 分流 ②createServer 开头 `if(!lib.node)lib.node={}` | 联机 P2P 分流还在吗 |
 | `apps/core/noname/library/element/content.ts` | waitForPlayer 改 `await game.createServer()` | 还在吗 |
 | `apps/core/mode/connect.js` | 「创建房间」按钮 + 不弹邀请链接 confirm | 还在吗 |
 | `apps/core/noname/library/init/index.js` | 下载离线资源(downloadOfflineAssets)增量补课 | 还在吗 |
 | `apps/core/noname/ui/create/index.js` | 分享文本改房间号引导 | 还在吗 |
 | `apps/core/noname/ui/create/menu/pages/otherMenu.js` | 检查更新按钮 + 双主页链接 | 还在吗 |
-| `scripts/build.ts` | ①产物校验 ②生成 pwa-core/all-assets.json(含 dist 根散文件) | 清单生成还在吗 |
+| `scripts/build.ts` | ①产物校验 ②生成 pwa-core/all-assets.json(含 dist 根散文件) ③`NOT_CORE` 剔大块头 + 补 PWA 图标进核心 | 清单生成还在吗;`NOT_CORE` 的三条理由是否仍成立(见第五节「核心清单的收录判据」) |
 | `apps/core/character/{bingshi,clan,huicui,mobile,newjiang,onlyOL,refresh,sb,sp,xianding}/character.js` | 给 35 个无立绘武将插 `img:` 字段(消除剪影),搜注释 `无自有立绘,复用同一人物的本体立绘` 可定位全部 | 跑 `node scripts/audit-character-images.cjs`,应报"零剪影"。**上游若补了真图,删掉我们的 `img:` 行**。详见 [docs/CHARACTER-IMAGES.md](./docs/CHARACTER-IMAGES.md) |
 | 新增文件(不会冲突) | `pwa-sw.js`、`manifest.webmanifest`、`peerAdapter.js`、`wrangler.jsonc`、`image/pwa/*`、本文档、README-PWA.md | 上游不会动,一般安全 |
