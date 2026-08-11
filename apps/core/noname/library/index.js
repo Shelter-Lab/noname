@@ -26,6 +26,31 @@ import skills from "./skill.js";
 
 const html = dedent;
 
+/**
+ * 狼人杀的板子与规则说明。
+ *
+ * 单机菜单在模式文件加载【之前】就要渲染配置项，而 mode/langrensha/index.js 的 getRule()
+ * 是模式运行时才装到 game 上的，菜单取不到 —— 故这里自带一份。
+ * 【改文案时两处要一起改】：本函数 + mode/langrensha/index.js 的 getRule()。
+ */
+function getLangrenshaRule() {
+	return (
+		`八人：2狼1狼王1预1女1猎1民1觉孤` +
+		`<br>十人：2狼1狼王1白狼1预1女1猎2民1觉孤` +
+		`<br>身份全程不公开。好人全阵亡则狼人阵营获胜。` +
+		`<br><br><b>预言家</b>：每轮开始时，你可以查看一名未以此法查看过的其他玩家的阵营。` +
+		`<br><b>猎人</b>：死亡后可以对一名其他角色造成等同于猎人体力上限点伤害。` +
+		`<br><b>女巫</b>：每局游戏限一次，非首轮游戏开始时，可以选择复活/毒杀一名其他角色。（均为3体力）` +
+		`<br><b>觉醒孤独少女</b>：首轮开始时须选择一名其他角色成为自己的偶像并加入平民阵营。偶像若因为狼刀或者狼人击杀死亡，则你继承偶像的阵营和技能；偶像若因为你击杀死亡，则你变为中立阵营且视为游戏目标失败；其他原因死亡，你加入狼人阵营且初始狼刀伤害为0。` +
+		`<br><b>平民</b>：可以摸鱼。` +
+		`<br><br><b>狼人阵营</b>：游戏开始前知晓其他狼人的身份，每轮开始时可以暗中选择一名玩家，使其流失X点体力（不触发技能）。狼人死亡后会随机将每轮狼刀伤害转移增加给队友。` +
+		`<br><b>狼人</b>：每轮1狼刀伤害。` +
+		`<br><b>狼王</b>：每轮1狼刀伤害。游戏开始前，若狼刀总数小于4，则改为2狼刀伤害。` +
+		`<br><b>白狼</b>：每轮1狼刀伤害。死亡后可以对一名其他角色造成等同于白狼体力上限点伤害。` +
+		`<br><b>隐狼</b>：被查验结果为好人，和狼人队友互相不可见。每轮1狼刀伤害，在其他狼人全部死亡前无法获得转移狼刀。`
+	);
+}
+
 export class Library {
 	configprefix = "noname_0.9_";
 	versionOL = 27;
@@ -8736,6 +8761,9 @@ export class Library {
 			name: "狼人杀",
 			// 不在 config.json 的 stockmode 里，开场闪屏必须自带图，否则 OnloadSplash 会读到 undefined
 			splash: "image/splash/style1/brawl.jpg",
+			// 六个身份（狼/民/预/巫/猎/觉孤）都没写 AI 决策，单机开局会卡在夜间刀人那步。
+			// 单机模式列表据此加灰显标注（startMenu.js 读它），配置栏里再给说明。
+			onlineOnly: true,
 			connect: {
 				connect_langrensha_mode: {
 					name: "游戏模式",
@@ -8822,8 +8850,22 @@ export class Library {
 				},
 			},
 			// 死亡流程会在广播回调里读 lib.mode[mode].config.dierestart（每端都读），缺了会抛错
+			// 另外这里的配置项就是单机菜单右侧栏（startMenu.js 读 info.config），
+			// 本模式六个身份（狼/民/预/巫/猎/觉孤）一个 AI 决策都没写，单机必然卡死在
+			// 夜间刀人/查验/用药那步。故不摆可玩的配置项，只摆两条说明，让人在点「启」之前
+			// 就知道要去联机。真正的兜底拦截仍在 mode/langrensha/index.js 的 start 里。
 			config: {
 				dierestart: false,
+				// 不能带 clear:true —— 那会走 menu/index.js:217 那条分支，跳过 lib.setIntro，
+				// 说明文字就没地方显示了。走默认分支才有长按/悬停弹出的说明框。
+				langrensha_onlyol_notice: {
+					name: "⚠️ 本模式仅联机可玩",
+					intro: "狼人杀的六个身份（狼人/平民/预言家/女巫/猎人/觉醒孤独少女）均无 AI 决策，单机开局会卡在夜间刀人这步，无法进行。<br><br><b>正确玩法</b>：返回主菜单点「联机」→ 创建房间或用房间号加入 → 在房间内选择「狼人杀」。<br><br>需要 8 或 10 名真人。板子按人数固定，人数不足会从尾部截断导致板子不完整。",
+				},
+				langrensha_onlyol_rule: {
+					name: "板子与规则",
+					intro: getLangrenshaRule(),
+				},
 			},
 		},
 	};

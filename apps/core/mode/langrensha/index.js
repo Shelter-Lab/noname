@@ -411,8 +411,37 @@ export default () => ({
 	start: [
 		async (event, trigger, player) => {
 			if (!_status.connectMode) {
-				// 本模式没有任何 AI，单机开不起来
-				alert("狼人杀目前仅联机模式可玩");
+				// 本模式六个身份一个 AI 决策都没写，单机必然卡死在夜间刀人那步。
+				// 单机菜单里已经摆了「仅联机可玩」的说明（library/index.js 的 langrensha_onlyol_notice），
+				// 这里是兜底：万一有人绕过菜单直接进来（老存档的 mode 记着 langrensha、
+				// 或 localStorage 的 directstart 残留），给一个能看懂的弹窗而不是卡死。
+				//
+				// 这条路仍然要 reload（得回主菜单，没有不重载的走法），但两处比原来强：
+				// ①先把 mode 落回 identity 并清掉 directstart，否则重载后又直奔狼人杀，
+				//   变成"弹窗→重载→弹窗"的循环（原来的 alert 版就有这个毛病）；
+				// ②用游戏内 dialog 而不是原生 alert —— alert 在 iOS standalone 上阻塞主线程，
+				//   且样式突兀。等用户点了按钮才 reload。
+				game.saveConfig("mode", "identity");
+				localStorage.removeItem(`${lib.configprefix}directstart`);
+				// 弹窗写法照抄 game/index.js:9836 那套现成范式（open → pause → control → onfree），
+				// 少了 onfree 的话点按钮不响应
+				await new Promise(resolve => {
+					const dialog = ui.create.dialog(
+						`<div class="text center"><b>狼人杀仅联机模式可玩</b></div>` +
+							`<div class="text">本模式的六个身份都没有 AI，单机开局会卡在夜间刀人这步。</div>` +
+							`<div class="text">请返回主菜单点「联机」，创建房间或用房间号加入，在房间内选择「狼人杀」。需要 8 或 10 名真人。</div>`,
+						"hidden"
+					);
+					dialog.open();
+					game.pause();
+					const control = ui.create.control("返回主菜单", () => {
+						dialog.close();
+						control.close();
+						game.resume();
+						resolve();
+					});
+					lib.init.onfree();
+				});
 				game.reload();
 				event.finish();
 				return;

@@ -4529,6 +4529,18 @@ div[data-decoration="bronze"]::after {
 .menubutton.large.disabled {
 	opacity: 0.5;
 }
+/* 仅联机可玩的模式（狼人杀）在单机模式列表里的样式：只做视觉暗示，仍可点选查看说明。
+   不能用 .disabled —— 那个类在 menu/index.js 里被当成"拦截点击"的判据。 */
+.menubutton.large.onlineonly {
+	opacity: 0.62;
+}
+.menubutton.large.onlineonly > .onlineonlytag {
+	display: block;
+	font-size: 12px;
+	line-height: 1;
+	margin-top: -1px;
+	opacity: 0.85;
+}
 .menubutton.large.smallfont {
 	font-size: 22px !important;
 	text-indent: -2px;

@@ -138,6 +138,14 @@ export const startMenu = function (connectMenu) {
 		var page = ui.create.div("");
 		var node = ui.create.div(".menubutton.large", info.name, position, clickMode);
 		node.mode = mode;
+		// 仅联机可玩的模式（如狼人杀：六个身份都没写 AI）在单机列表里标一下，
+		// 免得点进去才发现开不起来。仍允许点选——右侧栏会展示"为什么"和玩法说明。
+		// 【不复用现成的 .disabled】那个类在 menu/index.js:40/55/161 被当成"拦截点击"的判据，
+		// 加上去会连带禁掉点选。这里只要视觉暗示，故用自己的类名（样式见 layout.css）。
+		if (!connectMenu && info.onlineOnly) {
+			node.classList.add("onlineonly");
+			node.innerHTML = `${info.name}<span class="onlineonlytag">仅联机</span>`;
+		}
 		var connectDisplayMap = {
 			connect_player_number: null,
 			connect_versus_mode: null,
