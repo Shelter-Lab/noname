@@ -185,10 +185,10 @@
 
 ---
 
-## 五、冷启动变慢(2026-08-11)—— 一个症状,四个独立病因
+## 五、冷启动变慢(2026-08-11)—— 一个症状,六个独立病因
 
 **症状是一个**:冷启动(关掉 standalone PWA 再开)从 7~8 秒变 15 秒,**在线和离线一样慢**。
-**病因查出来是四个,机制互不相同**。这一点非常反直觉,查的时候差点用一个解释套住两边 ——
+**病因查出来是六个,机制互不相同**(病因五、六是修前四个时自己引入/暴露的,见各节)。这一点非常反直觉,查的时候差点用一个解释套住两边 ——
 「在线要重下 35MB」解释得了在线,但**离线一个字节都不下载,那条解释在离线场景下根本不成立**。
 先记住这个分流判据:
 
@@ -203,9 +203,12 @@
 | 病因二 | 离线 | 4 个必然 404 的请求串在 boot await 链上各等 4s | `ALWAYS_404` 短路 |
 | 病因三 | 两边 | 素材后台 SWR 每次冷启动跑 12 个(**下得越全跑得越多**) | `assetRevalidateWindow` 每构建只校验一次 |
 | 病因四 | 桌面/安卓离线 | 沙盒 iframe 加载 `sandbox.js`,iframe 不走 SW → 永久 pending → 60s 都出不了首屏 | `sandboxEnabled = false` 无条件跳过 |
+| 病因五 | 离线 | 断掉代码文件逐文件 SWR 后,`failStreak` 唯一的喂食来源也断了 → `looksOffline()` 恒假 → 快失败短路永不生效 | **未修**,改法待定(见下) |
+| 病因六 | 两边 | install 换版只写 `./index.html` 不写 `/`,导航读的是 `/` → 首页永远靠 SWR 慢一拍 | install 对首页额外 `put("/")` |
 
 **⚠️ 病因二的修法引入过一个回归,病因三顺带修掉了** —— 详见病因二末尾。这是本节最值得记住的一课:
 **删一个"纯浪费"的请求前,先查有没有别的机制在靠它的副作用工作。**
+**这一课在同一天又被违反了一次,代价是线上变砖 —— 见病因五。**
 
 ### 病因一(在线):install 失败时删构建戳,是粘住不自愈的性能悬崖
 
@@ -324,6 +327,96 @@
 `ALWAYS_404` 的放置位置)。**判据:凡是不由页面 JS 直接 `fetch()` 发出的请求,都要先问一句"它进不进 SW"**
 —— iframe 子资源、HEAD、非同源、`<link rel=icon>`/manifest icons 全是这一类。
 
+### 病因五(离线,**未修**):砍掉那 600 个"纯浪费"请求,把离线判定一起饿死了
+
+**病因二末尾那条教训,在同一天被同一个人又违反了一次,这次代价是线上变砖。** 完整记下来。
+
+`02331f7` 给命中分支的后台 revalidate 加了 `!isCodeAsset()`(为堵混搭源头,**这个修复本身是对的**)。
+但它顺带砍掉的那 600 个请求,**是 `failStreak` 唯一的喂食来源**。缓存装齐的冷启动从此一个
+`noteNetResult` 都产生不了:
+
+- 代码文件不再逐个后台校验 —— 那 600 个失败原本是 streak 的唯一来源
+- 素材校验被 `assetRevalidateWindow` 关着(病因三的修法,每构建只开一次)
+- `codeNeedsNetwork` 分支在 `STALE_KEY` 不存在时整个跳过
+- 导航分支的 `bgUpdate` 用 `.catch(() => null)` 把失败静静吞了,压根不记账
+
+于是 `failStreak` 恒为 0 → `looksOffline()` 恒假 → miss 分支那个「离线时一个网络往返都不发」的
+快失败短路(注释里自称"离线启动从分钟级降到秒级的关键")**永不生效**,离线冷启动退化成
+"每个未缓存资源各等满 `missTimeoutMs` 4~8s、串行累加"。
+
+> **★ 反直觉结论:缓存下得越全,离线启动越慢。** 因为下得越全越没有失败样本,SW 越发觉不出自己离线。
+
+#### 失败的修复尝试(`0589a49`,已被 `2783aff` revert)
+
+给 `noteNetResult(ok, strong)` 加 `strong`,导航请求失败时让 `failStreak` **一次顶满**。
+线上结果:`SyntaxError: importing binding name 'c' is not found`,**在线离线都坏**。
+
+**错在哪**:`looksOffline()` 有三个消费点,我当时以为它们都是"省时间"的,漏了一个是**正确性机制**:
+
+| 消费点 | 类别 | 被跳过的后果 |
+|---|---|---|
+| `pwa-sw.js` miss 分支快失败 | latency | 只是慢 |
+| 素材后台校验 | latency | 只是慢 |
+| **`codeNeedsNetwork`** | **correctness** | **直接从缓存喂跨版本混搭 chunk → link 失败 → 变砖** |
+
+`codeNeedsNetwork` 是 install 装不齐时把代码文件补成当前构建字节的**唯一补救**。误判成本因此
+从"少发几个请求"升级成"喂错字节"。而 CF 刚部署那次冷启动,导航的 2s 超时**在线也会超**
+(SW 正在装、单线程忙),所以在线同样被误判 —— 这就是为什么在线也坏。
+
+#### ★ 更深的坑:`failStreak` 到 3 之后会**自锁**
+
+这一条是事后测绘才发现的,比上面那个更阴:**所有 `noteNetResult(true)` 的复位点,都被
+`looksOffline()` 自己把着门。**
+
+- `codeNeedsNetwork`(含 `noteNetResult(true)`)要求 `!looksOffline()`
+- 素材后台校验(含 `noteNetResult(true)`)要求 `!looksOffline()`
+- miss 分支在 `ms > 0` 时直接短路 return,**走不到**后面那次 `fetch` 和它的 `noteNetResult(true)`
+- 而除 `cache:"no-cache"` 外,所有请求的 `ms` 都 > 0(4000/8000)
+
+**结果:`failStreak` 一旦到 3 就再也降不回来**,本次 SW 生命周期内只有下载器 / `repair()` 的
+`no-cache` 请求能解锁。一次误判会把补救分支**永久**关掉 —— correctness 风险从"慢一次"升级为
+"持续变砖"。
+
+> **★ 判据(下次改这块必读):任何"疑似离线"启发式,只能驱动 latency 类分支,绝不能驱动
+> correctness 类分支。** 而且改之前先问:这个状态一旦误置为真,**有没有路径能让它恢复?**
+
+**现状:病因五未修。** 它慢但不坏;而上一版修法的代价是变砖。改法待定,已知约束:
+`codeNeedsNetwork` 必须无条件走(速度让位于正确性)、不能重新依赖 `navigator.onLine`
+(iOS standalone 飞行模式下恒报 true,已证伪)、不能回退 `02331f7` 的"代码永不逐文件 SWR"。
+
+### 病因六(两边):install 换版漏写 `/`,首页永远靠 SWR 慢一拍
+
+**发现过程**:病因五的自修复本该接住 `binding name 'c'` 报错,但用户**从未见过**那个全屏
+「正在自动修复」提示。查出来是两层,第二层就是这个。
+
+**第一层(`3583599` 已修)**:`index.html` 里 112 行起那个块的 `window.onerror` 排在自修复 IIFE
+(218 行起)**之前**,属性式处理器与 `addEventListener` 按注册顺序执行 → 它先跑,而它最后那句
+`alert()` 是**同步阻塞**的:线程停在弹窗上,自修复的监听器根本轮不到。
+`ce6634a` 当时专门论证了"触发点必须用 `addEventListener`,因为 `noname/util/error.ts` 会重新赋值
+`window.onerror`" —— 那个分析对的是 `error.ts`,**漏了 `index.html` 自己就有一个更早、且带 alert 的**。
+修法:两个属性式处理器遇到混版措辞时让路,转调 `window.__pwaRepair()`。
+
+**同时修掉的死锁**:`alreadyTried` 靠 hash 上的 `__pwafixed` 判定,而摘掉标记要等一个 **20 秒**的
+`setTimeout`。但真实故障下报错在启动瞬间发生,用户看完弹窗就退出 —— 那 20 秒永远走不完,标记
+永久钉住,**自修复此后一次都不再触发**。修过一次(哪怕没修成)就再也修不了。改成立刻摘掉,
+防循环交给内存里的 `alreadyTried`(本次加载不重修,下次打开可再试)。
+
+**第二层(`2d5bca7` 已修)**:上面的修复推上线后**仍然没生效**,因为手机拿到的还是缓存里的旧首页。
+核心清单里首页写作 `"./index.html"`,install 用 `cache:"reload"` 取回后只 `put("./index.html")`;
+而**导航分支实际命中的 key 是 `"/"`**。两个 key 不同 → install 明明整版重下了新首页,导航读的
+`"/"` 还是旧的 → 首页只能靠导航分支的 SWR 慢一拍更新(本次喂旧、写回新、下次才生效)。
+
+> **★ 后果:任何改 `index.html` 的修复都至少要开两次 App 才生效** —— 而"启动就报错"这类故障
+> 根本撑不到第二次(用户看到弹窗就退出了)。**修白屏类故障的代码,自己却需要两次启动才上线,
+> 等于没修。**
+
+`repair()` 里早就写对了这一条(它对 `index.html` 额外 `put("/")`,注释还写着"漏了它会继续启动
+旧首页"),**install 这边一直漏着 —— 同一个坑只补了一处**。修法:install 主循环与重试轮遇到
+`index.html` 时额外 `cache.put("/", ...)`。
+
+**★ 教训:同一份内容有多个缓存 key 时,写入方必须全写、读取方的匹配顺序必须查清。**
+`repair()` 和 install 是两个独立的写入方,只有一个记得写 `"/"`。
+
 ### ★ 决策记录:为什么至今没给产物加 content hash
 
 **content hash 是什么**:在文件名里嵌内容指纹,`_virtual/aes.js` → `_virtual/aes.a3f9c2d1.js`,
@@ -423,4 +516,6 @@ iOS 不许 SW 返回 redirected 响应(`sanitizeResponse`)、后台 install 被�
 | `apps/core/noname/ui/create/menu/pages/otherMenu.js` | 检查更新按钮 + 双主页链接 | 还在吗 |
 | `scripts/build.ts` | ①产物校验 ②生成 pwa-core/all-assets.json(含 dist 根散文件) ③`NOT_CORE` 剔大块头 + 补 PWA 图标进核心 | 清单生成还在吗;`NOT_CORE` 的三条理由是否仍成立(见第五节「核心清单的收录判据」) |
 | `apps/core/character/{bingshi,clan,huicui,mobile,newjiang,onlyOL,refresh,sb,sp,xianding}/character.js` | 给 35 个无立绘武将插 `img:` 字段(消除剪影),搜注释 `无自有立绘,复用同一人物的本体立绘` 可定位全部 | 跑 `node scripts/audit-character-images.cjs`,应报"零剪影"。**上游若补了真图,删掉我们的 `img:` 行**。详见 [docs/CHARACTER-IMAGES.md](./docs/CHARACTER-IMAGES.md) |
+| `apps/core/index.html` | ①`window.onerror`/`onunhandledrejection` 遇模块混版措辞让路给 `__pwaRepair()` ②缓存自修复 IIFE(约 200 行) | **上游若重排内联 `<script>` 块顺序,必须重查**:自修复靠"内联脚本已同步执行完、`entry.ts` 在文件末尾才加载"才保证 `__pwaRepair` 已定义;且属性式 `onerror` 若又排到自修复前面而没有让路判断,自修复会再次形同虚设(病因六第一层) |
+| `apps/core/pwa-sw.js` | install 主循环与重试轮对 `index.html` 额外 `cache.put("/")` | 导航分支的 key 匹配顺序若变,这里要跟着改(病因六第二层)。**别删** —— 删了改 `index.html` 的修复要开两次 App 才生效 |
 | 新增文件(不会冲突) | `pwa-sw.js`、`manifest.webmanifest`、`peerAdapter.js`、`wrangler.jsonc`、`image/pwa/*`、本文档、README-PWA.md | 上游不会动,一般安全 |
