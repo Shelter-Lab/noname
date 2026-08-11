@@ -187,16 +187,17 @@ self.addEventListener("install", event => {
 							if (r && r.status === 200) {
 								const clean = await sanitizeResponse(r.clone());
 								await cache.put(url, clean);
-								// 【首页必须同时写 "/" ——否则 install 的整版 reload 对首页无效】
-								// 导航分支匹配的 key 依次是 req(通常是 "/")、"/"、"/index.html"、
-								// "./index.html",而清单里写的是 "./index.html":两个 key 不同,于是
-								// install 明明用 cache:"reload" 取回了新首页,导航实际读的 "/" 还是旧的。
-								// 后果:index.html 只能靠导航分支的 SWR 慢一拍更新(本次喂旧、写回新、
-								// 下次才生效),所以改 index.html 的修复至少要开两次 App 才生效 ——
-								// 而"启动就报错"这类故障根本撑不到第二次。repair() 里早就写了这一条
-								// (它对 index.html 额外 put 一份 "/"),install 这边一直漏着。
-								if (/\/index\.html$/.test(url) || /^\.\/index\.html$/.test(url)) {
-									await cache.put("/", await sanitizeResponse(r.clone()));
+								// 【首页必须把导航分支的每个读取 key 都写一遍】
+								// 导航分支按 req(通常 "/")→ "/" → "/index.html" → "./index.html"
+								// 顺序匹配,谁先命中用谁;而清单里写的是 "./index.html" —— 排在最后。
+								// 只写它等于白写:任何一个更早匹配的旧 key 都会把新首页挡住,于是
+								// install 明明用 cache:"reload" 取回了新首页,页面还在跑旧的。
+								// 后果:改 index.html 的修复反复冷启动多少次都不生效,而"启动就报错"
+								// 这类故障正是要靠 index.html 里的自修复来救 —— 修复代码永远到不了用户手里。
+								if (/index\.html$/.test(url)) {
+									const buf = await (await sanitizeResponse(r.clone())).arrayBuffer();
+									const mk = () => new Response(buf, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+									await Promise.all([cache.put("/", mk()), cache.put("/index.html", mk())]);
 								}
 								return true;
 							}
@@ -217,9 +218,11 @@ self.addEventListener("install", event => {
 							const r = await fetch(url, { cache: "reload" });
 							if (r && r.status === 200) {
 								await cache.put(url, await sanitizeResponse(r.clone()));
-								// 同上:首页要额外写 "/",否则导航分支读到的还是旧首页
-								if (/\/index\.html$/.test(url) || /^\.\/index\.html$/.test(url)) {
-									await cache.put("/", await sanitizeResponse(r.clone()));
+								// 同上:首页要把导航分支的每个读取 key 都写一遍
+								if (/index\.html$/.test(url)) {
+									const buf = await (await sanitizeResponse(r.clone())).arrayBuffer();
+									const mk = () => new Response(buf, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+									await Promise.all([cache.put("/", mk()), cache.put("/index.html", mk())]);
 								}
 								return url;
 							}
@@ -396,10 +399,20 @@ self.addEventListener("fetch", event => {
 					|| await cache.match("./index.html");
 
 				// 后台静默网络更新(fetchSafe 带超时,Safari 断网不会永久挂)
+				// 【必须把上面每个读取 key 都写一遍 —— 只写 req 等于永远读不到新首页】
+				// 读取端按 req → "/" → "/index.html" → "./index.html" 顺序匹配,谁先命中用谁。
+				// 原来只 cache.put(req, ...):若缓存里存在一个更早匹配的旧 key(常见,repair() 和
+				// 历史版本都写过 "/"),那份旧首页会一直命中在前面,新写进去的永远排在它后面用不上。
+				// 症状:改了 index.html 并部署后,反复冷启动多少次都还在跑旧首页 —— 表现得像
+				// "缓存根本没更新",实际是更新写到了另一个 key 上。修 index.html 类故障(白屏、
+				// 启动报错)时这一条是致命的:修复代码永远到不了用户手里。
 				const bgUpdate = fetchSafe(req)
 					.then(async resp => {
 						if (resp && resp.status === 200) {
-							cache.put(req, await sanitizeResponse(resp.clone()));
+							const html = await sanitizeResponse(resp.clone());
+							const buf = await html.arrayBuffer();
+							const mk = () => new Response(buf, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+							await Promise.all([cache.put(req, mk()), cache.put("/", mk()), cache.put("/index.html", mk()), cache.put("./index.html", mk())]);
 						}
 						return resp;
 					})

@@ -351,8 +351,17 @@
 					var r = await fetch(withBust(u), opts);
 					if (!r || r.status !== 200) throw new Error("取不到 " + u);
 					// 【key 必须是干净 URL】带 query 写进去等于没换版,页面下次要的还是干净 URL。
-					// index.html 额外再写一份 "/":SW 导航分支优先匹配 "/",漏了它会继续启动旧首页。
-					if (/\/index\.html$/.test(u)) await cache.put("/", await clean(r.clone()));
+					// 【首页要把 SW 导航分支的每个读取 key 都写一遍】它按 req → "/" →
+					// "/index.html" → "./index.html" 顺序匹配,谁先命中用谁。漏掉任何一个,
+					// 那个残留的旧 key 就会一直挡在前面,修复完照样启动旧首页(实测踩过:
+					// 反复冷启动多次都还在报同一个模块混版错,因为新首页写到了别的 key 上)。
+					if (/index\.html$/.test(u)) {
+						var htmlBuf = await (await clean(r.clone())).arrayBuffer();
+						var mkHtml = function () {
+							return new Response(htmlBuf, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+						};
+						await Promise.all([cache.put("/", mkHtml()), cache.put("/index.html", mkHtml())]);
+					}
 					await cache.put(u, await clean(r));
 					say("正在修复缓存… " + ++done + "/" + list.length + "\n请保持联网,不要关闭");
 				};
