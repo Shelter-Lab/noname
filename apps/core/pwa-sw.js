@@ -53,6 +53,27 @@ function isCodeAsset(pathname) {
 // 这些运行期动态接口即使残留也绝不缓存(纯静态部署下不存在,双保险)
 const BYPASS = ["/checkFile", "/checkDir", "/readFile", "/readFileAsText", "/writeFile", "/removeFile", "/getFileList", "/createDir", "/removeDir"];
 
+// 【线上必然 404 的启动期请求:一个网络往返都不发】
+// 实测 12 次冷启动,这几个 100% 出现、100% 失败,而且都串在 boot 的 await 链上:
+//   /vue            —— entry.ts 的 `import "vue/dist/vue.esm-browser.js"` 之外,还有个废弃兼容层
+//                      game/vue.esm-browser.js 写着 `export * from "vue"`。裸说明符只有主文档的
+//                      importmap 认得,一旦从别的上下文(iframe/worker)解析就退化成 /vue → 404。
+//   /preload.js     —— entry.ts:14 `await import("/preload.js")` 是**故意**要它失败的:catch 里才
+//                      分派 browser/cordova/node 平台入口。文件永远不存在,失败是正常流程。
+//   /noname.config.txt —— init/index.ts:843 `checkFile("noname.config.txt")` 探测有没有导入配置,
+//                      没有才是常态。
+//   /theme/style/card —— library/index.js:2463 `lib.init.css(assetURL+"theme/style/card", ...)`,
+//                      拼出来指向的是**目录**而不是文件。
+// 在线时它们只是各浪费一个 404 往返(几十毫秒);离线时每个都要等满 missTimeoutMs 的
+// 4 秒(script/document 档),而且是串行的 —— 这就是离线冷启动那十几秒白屏的主要来源,
+// 跟"重下 35MB"是两回事(离线一个字节都不下,那条解释在离线场景下不成立)。
+// 【为什么不能靠 looksOffline 兜住】那个要连续失败 3 次才判定离线,而学费恰好由启动链
+// 最前面这几个交 —— 等它生效,12 秒已经烧完了。
+// 【为什么直接返 404 而不是 Response.error()】它们的消费方都按"文件不存在"处理:
+// import() 靠 catch 分派平台、checkFile 靠非 200 返 -1。给个干净的 404 语义最贴近真相,
+// 也不会像带文本 body 的响应那样被当 JS 模块解析(那会引出 importing binding 之类的 link 错)。
+const ALWAYS_404 = ["/vue", "/preload.js", "/noname.config.txt", "/theme/style/card"];
+
 // Safari/WebKit 断网时 fetch() 不像 Chromium 那样立即 reject,
 // 而是长时间 pending 甚至永远不返回。给所有 SW 内的 fetch 加超时保护,
 // 超时后 abort → reject → 走缓存/504 兜底,避免白屏卡死。
@@ -195,14 +216,44 @@ self.addEventListener("install", event => {
 				// SW 生命周期都会让代码文件走网络——白白拖慢启动。这里装完立刻清掉重算。
 				codeStatePromise = null;
 			} catch (e) {
-				// 清单都没拿到(离线/CDN 抽风)→ 这一版一个文件都没换成。
-				// 必须清掉构建戳,让代码文件全部走 Network-First:此时缓存里极可能是上一版的
-				// 混搭状态,宁可慢也不能白屏。装齐的那次 install 会把戳补回来。
+				// 清单都没拿到(离线/CDN 抽风/iOS 把后台的 install 掐了)→ 这一版没换成。
+				//
+				// 【为什么不再 delete(BUILD_KEY)】原来这里是删戳,想的是"缓存来路不明,宁可慢也不能
+				// 白屏"。但删戳的代价被严重低估了:getCodeState 返回 fresh:false → codeNeedsFreshFetch
+				// 对**每个**代码文件都返回 true → 缓存里明明装着 625 个文件、一个不少,SW 也全部
+				// 绕开它去联网重取。实测(持久化 profile,同一份完整缓存,只差这一个戳):
+				//     戳在 → 首屏 1381ms / 打到网络 135 个 / 4.6MB
+				//     戳丢 → 首屏 4231ms / 打到网络 462 个 / 35.2MB
+				// 桌面千兆就 3 倍,手机 4G 上是 7~8 秒变 15 秒。
+				// 更糟的是它**粘住不自愈**:戳只有下一次 install 完整成功才补得回来,而 install 只在
+				// pwa-sw.js 字节变化(= 又部署一版)时才跑,中间每一次冷启动都在白烧几十 MB。
+				// 而"手机弱网下 33MB 的全量 reload 被掐断"恰恰是常态,不是罕见分支。
+				//
+				// 【改成什么】戳保留,把整份清单记进 STALE_KEY —— 这条路 codeNeedsFreshFetch 本来
+				// 就有(st.stale.has(pathname)),只是这个 catch 分支以前没走它。语义没变(该走网络的
+				// 照样走网络),但它是**可收敛的**:fetch 分支每取到一个就从缺失名单里划掉,启动一次
+				// 比一次快;而删戳是不可收敛的,永远从头再来。
+				// 拿不到清单时退化成"全部都算 stale",与旧行为等价,不会更差。
 				console.warn("[pwa-sw] 核心预缓存未完成:", e);
-				await caches
-					.open(CACHE)
-					.then(c => Promise.all([c.delete(BUILD_KEY), c.delete(STALE_KEY)]))
-					.catch(() => {});
+				try {
+					const cache = await caches.open(CACHE);
+					let all = [];
+					try {
+						const r = await cache.match("./pwa-core-assets.json");
+						if (r) all = await r.json();
+					} catch {
+						/* 清单读不到就留空 */
+					}
+					if (all.length) {
+						await cache.put(BUILD_KEY, new Response(BUILD, { headers: { "Content-Type": "text/plain" } }));
+						await cache.put(STALE_KEY, new Response(JSON.stringify(all), { headers: { "Content-Type": "application/json" } }));
+					} else {
+						// 连清单都没有 → 无从生成缺失名单,只能退回旧行为(全部 Network-First)
+						await Promise.all([cache.delete(BUILD_KEY), cache.delete(STALE_KEY)]);
+					}
+				} catch {
+					/* 缓存都开不了,交给下次 install */
+				}
 				codeStatePromise = null;
 			}
 			await self.skipWaiting();
@@ -259,6 +310,36 @@ async function codeNeedsFreshFetch(pathname) {
 	if (!st.fresh) return true; // 整批代码来路不明 → 全部走网络
 	if (!st.stale) return false; // 装齐了 → 一个都不用走
 	return st.stale.has(pathname); // 只补 install 时真没装成的那几个
+}
+
+// 缺失名单收敛:fetch 分支每从网络取到一个 stale 文件,就把它划掉。
+// 【为什么必须落盘而不只改内存】SW 进程空闲几十秒就被回收,内存里的 Set 一起没了;
+// 不落盘的话每次冷启动都从原始名单重新开始,永远收敛不了(那就是旧的删戳行为)。
+// 【为什么攒着批量写】一次冷启动可能划掉几百个,每个都 cache.put 一遍 JSON 等于把
+// 单线程的 SW 堵死在写缓存上,反而拖慢启动。故只标记,延迟 3 秒合并写一次。
+let staleFlushTimer = null;
+function noteStaleResolved(pathname) {
+	getCodeState().then(st => {
+		if (!st.fresh || !st.stale || !st.stale.delete(pathname)) return;
+		if (staleFlushTimer) return;
+		staleFlushTimer = setTimeout(async () => {
+			staleFlushTimer = null;
+			try {
+				const cache = await caches.open(CACHE);
+				const cur = await getCodeState();
+				if (!cur.fresh || !cur.stale) return;
+				if (cur.stale.size) {
+					await cache.put(STALE_KEY, new Response(JSON.stringify([...cur.stale]), { headers: { "Content-Type": "application/json" } }));
+				} else {
+					// 全部补齐 → 删掉名单,从此这一批代码走原来的纯缓存路径(启动速度回到最快)
+					await cache.delete(STALE_KEY);
+					console.log("[pwa-sw] 缺失的核心代码已全部补齐,恢复纯缓存启动");
+				}
+			} catch {
+				/* 写不进去无所谓,下次启动继续收敛 */
+			}
+		}, 3000);
+	});
 }
 
 self.addEventListener("fetch", event => {
@@ -319,6 +400,14 @@ self.addEventListener("fetch", event => {
 		return;
 	}
 
+	// 线上必然不存在的启动期请求:直接 404,不碰网络也不碰缓存(见 ALWAYS_404 处说明)。
+	// 放在 method 判断之前:checkFile 用的是 HEAD,而 HEAD 本来会被下面 `req.method !== "GET"`
+	// 放行到网络、连 SW 的超时兜底都吃不到(browser.js:37 那 2 秒超时就是为此而加)。
+	if (ALWAYS_404.includes(url.pathname)) {
+		event.respondWith(new Response("", { status: 404, statusText: "Not Found" }));
+		return;
+	}
+
 	// 其余只处理同源 GET
 	if (req.method !== "GET") return;
 
@@ -374,6 +463,9 @@ self.addEventListener("fetch", event => {
 					noteNetResult(true);
 					if (resp && resp.status === 200) {
 						cache.put(req, await sanitizeResponse(resp.clone()));
+						// 这个文件已经是当前构建的字节了 → 从缺失名单里划掉,下次启动它就不用再走网络。
+						// 这样"install 没装完"的代价会一次比一次小,而不是永远从头再来。
+						noteStaleResolved(url.pathname);
 						return await sanitizeResponse(resp);
 					}
 				} catch {

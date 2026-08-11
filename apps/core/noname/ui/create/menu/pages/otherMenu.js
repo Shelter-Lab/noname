@@ -165,10 +165,60 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					});
 			}
 
+			/**
+			 * 体检本地代码缓存:装的是哪一版、有没有"装着却不被信任"。
+			 * 【为什么按钮必须报这个】SW 判断能不能直接用缓存,看的是 /__pwa_build__ 这个戳
+			 * (见 pwa-sw.js 的 getCodeState)。戳一旦跟 SW 里的 BUILD 不符,缓存里 600 多个代码
+			 * 文件一个不少也全部绕开、每次冷启动重新联网取一遍 —— 首屏从 1.4s 变 4.2s(桌面千兆
+			 * 实测),手机 4G 上是 7~8 秒变 15 秒。而界面上以前完全看不出这个状态:版本号照样
+			 * 显示得好好的,"已是最新",人只觉得"明明缓存好了怎么还是慢"。故如实报出来。
+			 * @returns {Promise<{stamp:string|null,stale:number,entries:number}|null>}
+			 *          stamp = 缓存里这批代码的构建戳;stale = 还差几个文件没补齐;null = 读不到缓存
+			 */
+			async function inspectCache() {
+				if (!("caches" in window)) return null;
+				try {
+					var cache = await caches.open("noname-pwa-v2");
+					var rec = await cache.match("/__pwa_build__");
+					var stampInCache = rec ? await rec.text() : null;
+					var staleRec = await cache.match("/__pwa_stale__");
+					var staleList = staleRec ? await staleRec.json() : [];
+					var keys = await cache.keys();
+					return {
+						stamp: /^\d{10}$/.test(String(stampInCache || "")) ? stampInCache : null,
+						stale: Array.isArray(staleList) ? staleList.length : 0,
+						entries: keys.length,
+					};
+				} catch (e) {
+					return null;
+				}
+			}
+
+			/**
+			 * 强制重装核心代码文件。复用 index.html 里那套 __pwaRepair —— 它是唯一能绕开
+			 * "正在喂你旧字节的那个 SW" 的办法(给 URL 挂一次性查询串让 Cache Storage 必然未命中,
+			 * 逼 SW 走网络),重装完会把构建戳补上、清掉待补名单,然后自己刷新页面。
+			 * 【为什么不复用「下载离线资源」】那个是纯续传语义:缓存里有就跳过(见 library/init),
+			 * 所以它永远不会更新已存在的代码文件,也不会补戳 —— 治不了这个病。
+			 * @returns {boolean} 有没有真的开始重装
+			 */
+			function forceReinstallCore(reason) {
+				if (typeof window.__pwaRepair !== "function") {
+					alert("当前版本不支持强制重装(缺少修复入口),请重新打开应用后再试。");
+					return false;
+				}
+				if (!confirm(reason + "\n\n现在强制重装核心代码文件?\n\n· 需要联网下载约 30MB,4G 下大概几分钟\n· 已下载的立绘/语音一个都不会动\n· 完成后会自动刷新(进行中的对局会中断)\n· 中途请保持联网、不要关闭")) {
+					return false;
+				}
+				window.__pwaRepair();
+				return true;
+			}
+
 			// 【这个按钮不负责"下载"新版】新版由 index.html 每次 load 时无条件 register("./pwa-sw.js")
 			// 自动装(SW 字节变了就 install → skipWaiting → clients.claim)。但那一次装完**不会**动
 			// 已经加载进内存跑起来的旧 js,所以本次打开仍是旧版,要下次打开才生效。
-			// 本按钮的价值就两条:①告诉你在跑哪一版、线上是哪一版;②发现有新版时让你一键刷新立刻生效。
+			// 本按钮管三件事:①告诉你在跑哪一版、线上是哪一版;②有新版时一键刷新立刻生效;
+			// ③体检本地缓存,发现"装着却不被信任"(启动会白跑几十 MB)时给一键强制重装。
 			var checkUpdateBtn = ui.create.node("button", "检查更新", async function () {
 				var btn = this;
 				btn.textContent = "检查中…";
@@ -233,8 +283,10 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 						return;
 					}
 
-					// 【没问到线上戳时不能报"已是最新"】离线/超时都会让 latest 为 null,那时压根不知道
+				// 【没问到线上戳时不能报"已是最新"】离线/超时都会让 latest 为 null,那时压根不知道
 					// 线上是哪一版,报"最新"是撒谎。
+					// 【也不在这里做缓存体检】体检的结论只有"强制重装"这一个出手方式,而重装要联网下
+					// 30MB —— 连版本号都问不到的时候提议它没有意义。等联网正常了再说。
 					if (!latest) {
 						alert("联网检查失败,无法确认是否有新版本。\n当前版本:" + (runningStamp ? "v" + runningStamp : "未知") + "\n请确认网络后重试。");
 						return;
@@ -244,7 +296,28 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 						alert("线上最新版本:v" + latest + "\n当前页面版本未知(非正式构建),无法比对。");
 						return;
 					}
-					alert("已是最新版本(v" + latest + ")。");
+
+					// —— 到这里:联网正常、页面跑的就是线上最新版。再体检缓存,别放过"装着却不被信任"这种哑巴故障 ——
+					var health = await inspectCache();
+					if (health) {
+						// 缓存里的戳跟页面在跑的版本不符(常见成因:上一次 install 在手机弱网/后台被掐断)。
+						// 这时 SW 对每个代码文件都走 Network-First,冷启动白烧几十 MB、慢一倍以上。
+						// (注意:此处已排除"有新版待生效"那种正常的戳不一致 —— 那种在上面就 return 了。)
+						if (health.stamp !== runningStamp) {
+							forceReinstallCore("检测到本地代码缓存不可信" + (health.stamp ? "(缓存记录 v" + health.stamp + ",实际在跑 v" + runningStamp + ")" : "(缺少版本标记)") + "。\n\n后果:每次冷启动都要把几百个代码文件重新联网下载,启动会明显变慢(实测慢一倍以上),而且不会自己恢复。");
+							return;
+						}
+						// 戳对得上但还有文件没补齐:启动时会自动补、一次比一次快,能自愈,所以只是如实告知。
+						if (health.stale > 0) {
+							if (confirm("已是最新版本(v" + latest + ")。\n\n但本地还差 " + health.stale + " 个代码文件没缓存完,启动时会联网补齐(每次启动自动少几个,能自行恢复)。\n\n要现在一次性补齐吗?")) {
+								forceReinstallCore("将一次性补齐缺失的核心文件。");
+							}
+							return;
+						}
+					}
+					// 一切正常。顺带把体检结果报出来 —— 以后再遇到"缓存好了怎么还慢",
+					// 这一行就能直接说明是不是缓存问题,不用再靠猜。
+					alert("已是最新版本(v" + latest + ")。" + (health ? "\n\n本地缓存:" + health.entries + " 个文件,代码版本 v" + health.stamp + "(一致,启动直接读缓存)" : ""));
 				} catch (e) {
 					console.error("检查更新失败:", e);
 					alert("检查更新失败:" + (e && e.message ? e.message : e));
