@@ -16,17 +16,25 @@ const BUILD = "__BUILD_STAMP__";
 
 // —— 两个桶:代码一个小桶,素材一个大桶 ——
 //
-// 【为什么必须拆】原来代码和 ~14000 个素材挤在同一个桶里。Cache Storage 的每次访问都要
-// 先 caches.open(),而 WebKit 打开一个 Cache 时会把**整份记录表**载进内存 —— 桶里 730 条
-// 和 14993 条的开销差 20 倍,而这全发生在 SW 的单线程上。一次冷启动约 700 个请求,原来
-// 每个 fetch 事件都各自 caches.open() + cache.match() 一遍(见下面 openCode/openAsset 的
-// 记忆化),于是"下载完离线资源"之后启动稳定多花 4~5 秒。
-// 三条实测都只有这一个解释能同时对上:
-//   · 总时长在重新缓存后不变      → 瓶颈不是字节,不在下载
-//   · 在线 ≈ 离线                 → 瓶颈不是网络
-//   · 只有全量缓存态慢,核心态快   → 唯一变量就是桶里的条目数
-// 这与 TROUBLESHOOTING 第 3 节记的「逐个 cache.match 1.4 万次压垮 iOS 主线程」是同一个病,
-// 当时只修了下载器那一半(改成 cache.keys() 批量比对),启动读取这一半一直没动。
+// 【重要:拆桶治不了冷启动慢,这一点已被实测和 WebKit 源码双双证伪 —— 别再往这个方向使劲】
+// 这里原先写着「桶里 730 条和 14993 条的开销差 20 倍」并自称实测。**那个数字是编的**,
+// 我从没测过。后来真测了,结论正好相反:
+//   · 探针实测(iOS standalone,满缓存):caches.keys() 独占 15.8s,而它只是列桶名、不开桶;
+//     navigator.storage.estimate()(配额核算路径)只花 1ms;唤醒+派发 SW 仅 6ms;
+//     桶开好之后 cache.match 只 2ms,之后 645 个请求合计 682ms。
+//   · 同样约 2 万条 + SW 活着,桌面 Edge/Chromium 同一行只要几十毫秒(用户实测)。
+// 源码给出的机制(WebKit main,多方独立核对):caches.open() 走的是 CacheStorageAllCaches,
+// CacheStorageManager::allCaches() 里 `for (每个桶) cache->open()` —— **对 origin 下每一个桶
+// 都全量扫**,再 readAllRecordInfos() 逐条打开 record 文件读元信息。磁盘上没有任何 record 级
+// 索引(cacheslist 只存桶名),所以这笔账无法通过分桶规避。Chromium 有持久化索引,故不受影响。
+// 成本 ≈ 每文件 I/O × 文件数(15.8s / 21307 ≈ 0.74ms/条,正好是冷态闪存随机读的区间);
+// 扫描时 `if (recordName.endsWith(blobSuffix)) continue;` 跳过大 body 实体,故**与总字节无关**
+// —— 压缩素材体积没用,唯一的杠杆是**降条目数**。
+//
+// 【那这两个桶为什么还留着】拆桶本身无害(代码桶小、语义也更清楚),而合回去要动读写两端、
+// 且会让用户重下代码 —— 收益为零、风险不为零,故保留现状。真正的解法是让素材不再以
+// 「一个文件一条记录」的形式进 Cache Storage(打包成少量大文件),那是另一件事。
+// 参见 TROUBLESHOOTING 的冷启动章节。
 //
 // 【素材桶为什么沿用旧名】换名等于用户下过的 1GB 立绘/语音全部作废重下。代码桶是新名,
 // 用户只重下约 27MB 代码,素材一个字节都不碰。
@@ -34,87 +42,6 @@ const BUILD = "__BUILD_STAMP__";
 // cache.delete 打在 14993 条的大桶上本身就是一次昂贵操作 —— 省下来的收益抵不上风险。
 const CODE_CACHE = "noname-code-v1";
 const ASSET_CACHE = "noname-pwa-v2";
-
-// ===== 冷启动诊断埋点(临时,查完 15 秒问题连同 /__swdiag 分支一起删)=====
-// 【为什么必须在 SW 里自己计时】页面侧的 PerformanceResourceTiming 在 iOS/WebKit 上
-// 不填 workerStart、transferSize、decodedBodySize(实测面板报「过SW 0 / SW累计 0ms /
-// 0.00MB」而请求数 645,自相矛盾)—— 拿它拆导航阶段等于拿全 0 的字段做除法。
-// 而 SW 里 Date.now() 是可靠的,且**与页面共享同一墙钟**:页面知道
-// timeOrigin + navigation.fetchStart = 浏览器发起导航请求的绝对时刻,
-// SW 知道 fetch 事件到达自己手里的绝对时刻,两者相减就是"浏览器唤醒 SW 并把事件
-// 派发进来"的纯开销 —— 这一个数就能定死"是不是 iOS 系统层的硬伤"。
-// SWDIAG.t0 = 这个 SW 实例开始执行顶层代码的时刻(= 冷唤醒起点)。
-const SWDIAG = { t0: Date.now(), nav: null, probe: null, evalMs: 0 };
-
-/**
- * 【三个探针:回答"搬家值不值"这一个问题】临时代码,结论出来后连同 SWDIAG 一起删。
- *
- * 已实测:iOS 上 openCode() 花 15.2s,而它打开的代码桶只有 730 条 —— 730 条不可能要
- * 15 秒,所以贵的不是这个桶自己的内容;同样的代码同样约 15000 条,Edge 上是几十毫秒。
- * 但还有一个变量没分开:贵的是**条目数**(15000 条记录)还是**总字节**(1GB)?
- * 历史上"1~2k 文件时快"那会儿两者是绑在一起变的,从现有数据里分不出来。这决定了
- * 把素材搬去 IndexedDB 有没有意义 —— 若是字节贵,IndexedDB 一样得管这 1GB,搬了白搬,
- * 而搬家的代价是用户那 1GB 要重下一次。故必须先测,再决定。
- *
- * 【必须跑在 openCode() 之前】源级初始化的账谁先碰谁付。若探针排在 openCode() 后面,
- * 15 秒早被它付掉了,探针只会量到一个飞快的假数字,等于白测。
- *
- * ① keysMs —— caches.keys():只列桶名,不开桶、不创建任何东西。它也慢
- *    ⇒ 证实是**源级初始化**,与桶内容无关(那 730 条洗清了)。
- * ② idbMs —— 在**用户这台机器、这 1GB 数据**上真开一次 IndexedDB。
- *    这是最关键的一项:它快而 Cache Storage 慢 ⇒ 搬家真的有用;
- *    两个都慢 ⇒ 别搬,白挨一刀(也就省下让用户重下 1GB)。
- * ③ usage/quota/条目数 —— 把"条目数"和"总字节"两个变量分开摆出来。
- *
- * 只在这个 SW 实例的第一次导航请求时跑一次(结果存 SWDIAG.probe),之后不再花时间。
- */
-async function runProbe() {
-	const out = {};
-	try {
-		const a = Date.now();
-		const names = await caches.keys();
-		out.keysMs = Date.now() - a;
-		out.buckets = names.length;
-	} catch (e) {
-		out.keysMs = -1;
-	}
-	try {
-		const b = Date.now();
-		// 开一个自己的空库:不碰游戏数据(noname 用的是 configprefix+"data"),纯粹量
-		// "这台机器上 IndexedDB 的首次打开成本"。open 是异步事件式的,包成 Promise 等它真就绪。
-		await new Promise((res, rej) => {
-			const rq = indexedDB.open("__pwa_probe__", 1);
-			rq.onsuccess = () => {
-				try {
-					rq.result.close();
-				} catch (e) {}
-				res();
-			};
-			rq.onerror = () => rej(rq.error);
-			rq.onblocked = () => res(); // 被别的连接挡住也算"能开",不卡住诊断
-		});
-		out.idbMs = Date.now() - b;
-	} catch (e) {
-		out.idbMs = -1;
-	}
-	try {
-		// estimate() 报的是整个源的占用,与桶无关 —— 正好是我们要的"总字节"。
-		// 【也要单独计时】WebKit 的配额核算(OriginQuotaManager::getUsageFunction)是
-		// IDB + CacheStorage + FileSystem 三者相加,其中 CacheStorage 那项在没有
-		// estimatedsize 缓存文件时会退化成递归遍历整个 origin 目录。所以它是**另一条**
-		// 也会随条目数变慢的路径。已知 keysMs 独占 15.6s(它压根不碰配额),故元凶是
-		// caches.keys() 那条全量扫;但 estMs 若同样很大,说明 pack 化还得考虑这条路径
-		// (它连 -blob 实体文件都要 stat,收益要重算)。分开量,别再靠猜。
-		const c = Date.now();
-		const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null;
-		out.estMs = Date.now() - c;
-		if (est) {
-			out.usageMB = Math.round((est.usage || 0) / 1048576);
-			out.quotaMB = Math.round((est.quota || 0) / 1048576);
-		}
-	} catch (e) {}
-	return out;
-}
 
 // 【记忆化 caches.open:一次 SW 生命周期只开一次,不是每个请求开一次】
 // 原来三处分支(导航 / 清单 / 主分支)各自 `await caches.open(CACHE)`,等于每个 fetch 事件
@@ -569,58 +496,22 @@ self.addEventListener("fetch", event => {
 	// 所以导航也走 Cache-First(SWR):有缓存秒返回,后台静默更新;
 	// 额外加多 key 匹配兜底,防 / vs /index.html 等 URL 差异导致 miss。
 	if (req.mode === "navigate") {
-		// 【诊断】事件到达 SW 的时刻。减去页面侧的 fetchStart 就是"唤醒+派发"开销;
-		// 减去 SWDIAG.t0 则说明这个实例是不是刚被冷启动起来的(≈0 = 刚起,大 = 早就活着)。
-		const dEvent = Date.now();
 		event.respondWith(
 			(async () => {
 				// index.html 属代码,放代码桶。但**必须兜底查一次旧的素材桶**:老用户升到这一版时,
 				// 唯一那份首页还躺在旧桶里,新代码桶要等 install 装完才有 —— 中间那一瞬若读不到首页,
 				// 离线打开就直接 504 白屏。旧桶只在新桶没命中时才查,装齐后这一路永远不走。
-				// 【诊断】探针必须排在 openCode() **之前**:源级初始化的账谁先碰谁付,
-				// 排在后面就只会量到一个飞快的假数字。只在本实例第一次导航时跑。
-				if (!SWDIAG.probe) SWDIAG.probe = await runProbe();
-				const dProbe = Date.now();
-				// 【诊断】第一次碰 Cache Storage 的开销单独计时 —— 这是当前最大的嫌疑:
-				// WebKit 在 SW 冷启动后首次 open 时要把该源的缓存索引载入,而索引规模正比于
-				// 总条目数(15000 vs 700)。这能同时解释"只慢在导航阶段"和"缓存下得越全越慢"。
 				const cache = await openCode();
-				const dOpen = Date.now();
-				// 【诊断】两个桶各有多少条 —— "条目数"这个变量的实际值,和 usageMB 配对看。
-				// keys() 本身可能不便宜,故排在计时之后,不污染上面任何一项。
-				try {
-					SWDIAG.probe.codeEntries = (await cache.keys()).length;
-					SWDIAG.probe.assetEntries = (await (await openAsset()).keys()).length;
-				} catch (e) {}
 				// 多 key 尝试:缓存里 URL 可能是 /、/index.html、./index.html 中的任一种
-				// 【诊断】逐个 match 分开计时,才能看出是"第一下贵"(索引载入)还是"每下都贵"。
-				let hit = await cache.match(req);
-				const dM1 = Date.now();
-				if (!hit) hit = await cache.match("/");
-				const dM2 = Date.now();
-				if (!hit) hit = await cache.match("/index.html");
-				if (!hit) hit = await cache.match("./index.html");
-				const dM4 = Date.now();
-				let dAsset = dM4;
-				if (!hit) {
-					const old = await openAsset();
-					hit = (await old.match(req)) || (await old.match("/")) || (await old.match("/index.html")) || (await old.match("./index.html"));
-					dAsset = Date.now();
-				}
-				const cached = hit;
-				// 【诊断】把这次导航的各段耗时存起来,等页面来 /__swdiag 取。
-				// 只存最近一次:页面一启动就会来取,不需要历史。
-				SWDIAG.nav = {
-					swAgeMs: dEvent - SWDIAG.t0, // 事件到达时,这个 SW 实例已活了多久(≈0 = 冷启动)
-					evtAbs: dEvent, // 事件到达的绝对时刻(页面拿它减 fetchStart = 唤醒+派发开销)
-					probeMs: dProbe - dEvent, // 三个探针合计(它排在 openCode 之前,故源级的账在这里付)
-					openMs: dOpen - dProbe, // 首次 caches.open() —— 索引载入嫌疑
-					m1Ms: dM1 - dOpen, // 第一次 match(req)
-					m2Ms: dM2 - dM1, // 第二次 match("/")
-					m34Ms: dM4 - dM2, // 第三四次 match
-					assetMs: dAsset - dM4, // 兜底查大素材桶(满缓存下应为 0 = 没走)
-					hit: !!cached,
-				};
+				const cached =
+					(await cache.match(req)) ||
+					(await cache.match("/")) ||
+					(await cache.match("/index.html")) ||
+					(await cache.match("./index.html")) ||
+					(await (async () => {
+						const old = await openAsset();
+						return (await old.match(req)) || (await old.match("/")) || (await old.match("/index.html")) || (await old.match("./index.html"));
+					})());
 
 				// 后台静默网络更新(fetchSafe 带超时,Safari 断网不会永久挂)
 				// 【必须把上面每个读取 key 都写一遍 —— 只写 req 等于永远读不到新首页】
@@ -652,11 +543,7 @@ self.addEventListener("fetch", event => {
 					// 重开一看戳还是老的(实测好几次都这样);index.html 里那套自修复同样永远到不了用户手里。
 					// waitUntil 让 SW 至少活到这次写入完成,代价仅是一次几十 KB 的后台请求(带超时,不会挂死)。
 					event.waitUntil(bgUpdate);
-					const out = await sanitizeResponse(cached);
-					// 【诊断】SW 把响应交还浏览器的时刻。retMs 覆盖 sanitizeResponse ——
-					// 它在 redirected 时会 await resp.blob() 把整个首页读成 blob 再重建,不是零成本。
-					SWDIAG.nav.retMs = Date.now() - dEvent;
-					return out;
+					return await sanitizeResponse(cached);
 				}
 
 				// 没缓存:只能等网络(首次访问必须联网)
@@ -686,20 +573,6 @@ self.addEventListener("fetch", event => {
 	// 放行到网络、连 SW 的超时兜底都吃不到(browser.js:37 那 2 秒超时就是为此而加)。
 	if (ALWAYS_404.includes(url.pathname)) {
 		event.respondWith(new Response("", { status: 404, statusText: "Not Found" }));
-		return;
-	}
-
-	// 【诊断】页面读取上面那些打点用的内部接口(临时,查完连同 SWDIAG 一起删)。
-	// 放在最前面:它不是真实资源,绝不能进缓存分支,也不该被 ALWAYS_404 之类拦掉。
-	if (url.pathname === "/__swdiag") {
-		event.respondWith(
-			// 【probe 必须一起送出去】上一版漏了它:探针在 SW 里跑完、面板也写好了显示,
-			// 但这个响应体里没带 probe 字段 → 面板恒显示「探针:无数据」。
-			new Response(JSON.stringify({ now: Date.now(), swBornAt: SWDIAG.t0, nav: SWDIAG.nav, probe: SWDIAG.probe }), {
-				status: 200,
-				headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
-			})
-		);
 		return;
 	}
 

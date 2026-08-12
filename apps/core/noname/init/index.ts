@@ -488,11 +488,6 @@ export async function boot() {
 	if (!lib.imported.mode?.[lib.config.mode]) {
 		window.inSplash = true;
 		clearTimeout(window.resetGameTimeout);
-		// 【冷启动诊断埋点】这里是"用户第一次看见东西"的诚实时点:看门狗在这一行被清掉,
-		// 闪屏随即显示。index.html 底部那个诊断面板等这个值出现后才统计,免得把"还在加载"
-		// 当成"已启动"。查完 15 秒问题就把这行和面板一起删掉。
-		// @ts-expect-error 诊断用的临时全局
-		window.__bootDoneAt = performance.now();
 
 		if (typeof lib.config.splash_style == "undefined") {
 			game.saveConfig("splash_style", lib.onloadSplashes[0].id);
