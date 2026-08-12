@@ -198,18 +198,6 @@ function noteNetResult(ok) {
 	else if (failStreak < OFFLINE_STREAK) failStreak++;
 }
 
-// —— 素材后台校验的开窗:每个构建只开一次,不是每次冷启动都开 ——
-// 【病】命中缓存的素材原来一律发一个后台 fetch 问"变了没"。实测每次冷启动稳定 12 个这样的
-// 请求(icon/ol_bg/卡背/手牌框/花体字/splash/BGM),而且**下载得越全,这种请求越多**——
-// 它的触发条件恰恰是"缓存命中"。代价:在线 12 个 304 往返(零字节但占满 SW 单线程),
-// 离线 12 个各等满 missTimeoutMs,iOS 还会因此弹「蜂窝数据已关闭」。
-// 【关键认识】素材只有在"又部署了一版"时才可能变。而换版必然伴随一次 install(SW 字节变了),
-// 那一次也必然在线(清单都是网络取的)。所以校验只需要跟着 install 走一次,不需要每次启动重来。
-// 【为什么用内存标记而不落盘】它不需要跨 SW 重启存活:SW 被回收后窗口自然关闭,而"窗口关着"
-// 正是我们想要的快路径;下次真换版又会有新的 install 重新开窗。这跟"下载中"那种必须持久化的
-// 状态不同(丢了会误杀下载),这里丢了只是更快,没有正确性损失。
-// 【代码文件不受影响】代码永不逐文件 SWR(见 fetch 分支说明),整版由 install 换。
-let assetRevalidateWindow = false;
 
 // 决定"未命中缓存的请求"该用多长超时(0=不超时)。
 // 【关键教训】不能靠 navigator.onLine 判离线:iOS 主屏 PWA 飞行模式下 onLine 常仍报 true,
@@ -245,9 +233,6 @@ async function sanitizeResponse(resp) {
 }
 
 self.addEventListener("install", event => {
-	// 换版了(SW 字节变了才会走 install)→ 给素材开一次后台校验窗口,让更新过的立绘/语音能刷新。
-	// 之后的每次冷启动窗口都是关的,一个素材校验请求都不发(见 assetRevalidateWindow 处说明)。
-	assetRevalidateWindow = true;
 	// install 阶段预缓存"启动+标准对局必需"的核心文件(约 33MB,清单由构建生成)。
 	// 保证断网时也能稳定启动、进模式、玩标准局。失败不阻塞安装(降级为访问即缓存)。
 	// 注:保持简单快速——曾加"重试3轮+对账709项"导致 install 变慢/在 Safari 上迟迟装不上,
@@ -722,23 +707,12 @@ self.addEventListener("fetch", event => {
 				// 故:代码文件只允许由 install 整版写入(cache:"reload" 全量),永不逐文件更新。
 				// 顺带每次启动省掉 600+ 个无用的后台请求。
 				//
-				// 【素材:只在换版那一次校验,不是每次冷启动】原来这里对每个命中缓存的素材都发一个
-				// 后台 fetch。实测每次冷启动固定 12 个(icon/ol_bg/卡背/花体字/splash/BGM),在线是
-				// 12 个 304 往返、离线是 12 个等满超时 + iOS 弹「蜂窝数据已关闭」。而素材只可能在
-				// 换版时变,换版必然有 install、install 必然在线 —— 跟着 install 开一次窗就够了。
-				// 【为什么不能靠 looksOffline 兜】它要连续失败 3 次才判离线,前 3 个素材照样各等满
-				// 超时;而且 ALWAYS_404 短路后那几个请求不再产生失败计数,streak 更涨不上去。
-				if (assetRevalidateWindow && !looksOffline() && !isCode) {
-					fetchSafe(req)
-						.then(async resp => {
-							noteNetResult(true);
-							if (resp && resp.status === 200) {
-								const clean = await sanitizeResponse(resp.clone());
-								cache.put(req, clean);
-							}
-						})
-						.catch(() => noteNetResult(false));
-				}
+				// 【素材的后台校验分支已随迁移下线】原来这里对命中缓存的素材发后台 fetch 校验
+				// (且只在换版那一次开窗,见 assetRevalidateWindow)。现在走不到了:非代码请求在
+				// 本分支之前就已由 IndexedDB 应答并 return,能到这儿的 cached 一定是代码,
+				// 而代码**永不逐文件 revalidate**(理由见上一段:那是缓存混版的真正源头)。
+				// 留着反而危险 —— 它的 cache.put 会把素材写进代码桶,把病因七养回来。
+				// 素材的更新改由「下载离线资源」按清单补齐(它带 no-cache,拿的是网络真字节)。
 				return await sanitizeResponse(cached);
 			}
 
@@ -758,10 +732,30 @@ self.addEventListener("fetch", event => {
 				noteNetResult(true);
 				if (resp && resp.status === 200) {
 					const clean = await sanitizeResponse(resp.clone());
-					cache.put(req, clean);
+					// 【访问即缓存:素材必须写进 IndexedDB,绝不能写回代码桶】
+					// 这是本文件最容易悄悄毁掉整个优化的一行。两个原因:
+					//  1. 写回 Cache Storage 会把病因七原样养回来 —— 联网玩一局下来几百张立绘
+					//     进桶,条目数重新涨起来,下次冷启动那 15.8 秒就回来了,而且没人会察觉。
+					//  2. SW 读素材只查 IndexedDB(见上面那段),写进 Cache Storage 等于写了个
+					//     没人读的副本:白占空间、白付扫描成本、下次访问照样联网。
+					// 「访问即缓存」必须保住 —— 它是"没点过下载离线资源、但联网玩过一局之后
+					// 离线也能看到那些立绘"的唯一来源(用户原话:以前刷新一下立绘就出来了)。
+					// 【为什么用 event.waitUntil】响应一返回,这个 fetch 事件就算处理完,浏览器
+					// 随时回收 SW,写入会中途蒸发 —— 病因六踩过同一个坑(那次是首页写不进去)。
+					if (assetDBReady && !isCode) {
+						event.waitUntil(
+							clean
+								.clone()
+								.arrayBuffer()
+								.then(buf => putAsset(url.pathname, buf, guessMime(url.pathname, clean.headers.get("Content-Type") || "")))
+								.catch(() => {}) // 写不进去只是这次没缓存上,下次访问再试,绝不影响本次响应
+						);
+					} else {
+						cache.put(req, clean);
+					}
 				}
 				return await sanitizeResponse(resp);
-			} catch {
+				} catch {
 				noteNetResult(false);
 				// script/style/module 未命中失败时,绝不能返回带文本 body 的响应——
 				// 浏览器会把 "离线且资源未缓存" 这段文本当 JS/CSS 模块解析,导致
