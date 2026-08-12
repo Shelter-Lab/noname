@@ -8764,6 +8764,29 @@ export class Library {
 			// 六个身份（狼/民/预/巫/猎/觉孤）都没写 AI 决策，单机开局会卡在夜间刀人那步。
 			// 单机模式列表据此加灰显标注（startMenu.js 读它），配置栏里再给说明。
 			onlineOnly: true,
+			// 两项共用的展开/收起。挂在 mode 上而不是各写一份，免得改一处漏一处。
+			// 【为什么返回值要留意】clickToggle 里 `onclick(...) === false` 会把 .on 状态回滚，
+			// 所以这里绝不能返回 false，否则点一下就被自己撤销、看起来像没反应。
+			toggleNotice: function (node, opened) {
+				var box = node.querySelector(".langrensha-notice-body");
+				if (!opened) {
+					if (box) box.remove();
+					return;
+				}
+				if (box) return;
+				var cfg = node._link && node._link.config;
+				var text = cfg && cfg.intro;
+				if (typeof text === "function") text = text();
+				box = document.createElement("div");
+				box.className = "langrensha-notice-body";
+				// 菜单里那条 `.menu-buttons div { position: absolute }` 会把普通 div 糊成一坨
+				// （README-PWA 里记过这个坑），所以显式改回 relative。
+				box.setAttribute("style", "position:relative;margin-top:6px;font-size:14px;line-height:1.7;text-align:left;white-space:normal;opacity:.85;");
+				box.innerHTML = text || "";
+				node.appendChild(box);
+				// 文字展开后行高会超出默认的固定高度，撑开容器免得被裁掉
+				node.style.height = "auto";
+			},
 			connect: {
 				connect_langrensha_mode: {
 					name: "游戏模式",
@@ -8862,15 +8885,31 @@ export class Library {
 				// 撞 30s 看门狗弹「游戏似乎未正常载入，是否重置」。
 				// identity/guozhan 的 dierestart 都是完整对象({name,init,onclick})；本模式仅联机可玩，
 				// 单机的「死亡后显示重来」用不上，故直接不写这一项。
-				// 不能带 clear:true —— 那会走 menu/index.js:217 那条分支，跳过 lib.setIntro，
-				// 说明文字就没地方显示了。走默认分支才有长按/悬停弹出的说明框。
+				//
+				// 【这两项是说明文字，不是开关 —— 必须带 clear:true】
+				// 不带 clear 会走 createConfig 的默认分支，而那条分支对"没有 item/range/input"的项
+				// 一律画成布尔 toggle：于是两条纯说明被渲染成两个可拨的开关，用户以为拨了会改规则，
+				// 实际上没有 init 也没有 onclick，拨动只是往 localStorage 写一个没人读的键。
+				// 上一版就是这样，误导了人（"打开后和不打开有什么差别"——答案是没差别）。
+				// clear:true 走 menu/index.js 的另一条分支：只画一行文字 + 挂 clickToggle，
+				// 由 onclick 收到展开状态、自己插/删说明块 —— 即"点一下展开详情"，
+				// 与「网页扩展」里那个详细说明按钮同一个交互。
+				// 代价是 clear 分支跳过 lib.setIntro（长按弹框没了），故改由点击展开，信息不丢。
 				langrensha_onlyol_notice: {
-					name: "⚠️ 本模式仅联机可玩",
+					name: "⚠️ 本模式仅联机可玩（点此展开）",
+					clear: true,
 					intro: "狼人杀的六个身份（狼人/平民/预言家/女巫/猎人/觉醒孤独少女）均无 AI 决策，单机开局会卡在夜间刀人这步，无法进行。<br><br><b>正确玩法</b>：返回主菜单点「联机」→ 创建房间或用房间号加入 → 在房间内选择「狼人杀」。<br><br>需要 8 或 10 名真人。板子按人数固定，人数不足会从尾部截断导致板子不完整。",
+					onclick: function (opened) {
+						return lib.mode.langrensha.toggleNotice(this, opened);
+					},
 				},
 				langrensha_onlyol_rule: {
-					name: "板子与规则",
-					intro: getLangrenshaRule(),
+					name: "板子与规则（点此展开）",
+					clear: true,
+					intro: getLangrenshaRule,
+					onclick: function (opened) {
+						return lib.mode.langrensha.toggleNotice(this, opened);
+					},
 				},
 			},
 		},
