@@ -44,7 +44,69 @@ const ASSET_CACHE = "noname-pwa-v2";
 // SW 知道 fetch 事件到达自己手里的绝对时刻,两者相减就是"浏览器唤醒 SW 并把事件
 // 派发进来"的纯开销 —— 这一个数就能定死"是不是 iOS 系统层的硬伤"。
 // SWDIAG.t0 = 这个 SW 实例开始执行顶层代码的时刻(= 冷唤醒起点)。
-const SWDIAG = { t0: Date.now(), nav: null, evalMs: 0 };
+const SWDIAG = { t0: Date.now(), nav: null, probe: null, evalMs: 0 };
+
+/**
+ * 【三个探针:回答"搬家值不值"这一个问题】临时代码,结论出来后连同 SWDIAG 一起删。
+ *
+ * 已实测:iOS 上 openCode() 花 15.2s,而它打开的代码桶只有 730 条 —— 730 条不可能要
+ * 15 秒,所以贵的不是这个桶自己的内容;同样的代码同样约 15000 条,Edge 上是几十毫秒。
+ * 但还有一个变量没分开:贵的是**条目数**(15000 条记录)还是**总字节**(1GB)?
+ * 历史上"1~2k 文件时快"那会儿两者是绑在一起变的,从现有数据里分不出来。这决定了
+ * 把素材搬去 IndexedDB 有没有意义 —— 若是字节贵,IndexedDB 一样得管这 1GB,搬了白搬,
+ * 而搬家的代价是用户那 1GB 要重下一次。故必须先测,再决定。
+ *
+ * 【必须跑在 openCode() 之前】源级初始化的账谁先碰谁付。若探针排在 openCode() 后面,
+ * 15 秒早被它付掉了,探针只会量到一个飞快的假数字,等于白测。
+ *
+ * ① keysMs —— caches.keys():只列桶名,不开桶、不创建任何东西。它也慢
+ *    ⇒ 证实是**源级初始化**,与桶内容无关(那 730 条洗清了)。
+ * ② idbMs —— 在**用户这台机器、这 1GB 数据**上真开一次 IndexedDB。
+ *    这是最关键的一项:它快而 Cache Storage 慢 ⇒ 搬家真的有用;
+ *    两个都慢 ⇒ 别搬,白挨一刀(也就省下让用户重下 1GB)。
+ * ③ usage/quota/条目数 —— 把"条目数"和"总字节"两个变量分开摆出来。
+ *
+ * 只在这个 SW 实例的第一次导航请求时跑一次(结果存 SWDIAG.probe),之后不再花时间。
+ */
+async function runProbe() {
+	const out = {};
+	try {
+		const a = Date.now();
+		const names = await caches.keys();
+		out.keysMs = Date.now() - a;
+		out.buckets = names.length;
+	} catch (e) {
+		out.keysMs = -1;
+	}
+	try {
+		const b = Date.now();
+		// 开一个自己的空库:不碰游戏数据(noname 用的是 configprefix+"data"),纯粹量
+		// "这台机器上 IndexedDB 的首次打开成本"。open 是异步事件式的,包成 Promise 等它真就绪。
+		await new Promise((res, rej) => {
+			const rq = indexedDB.open("__pwa_probe__", 1);
+			rq.onsuccess = () => {
+				try {
+					rq.result.close();
+				} catch (e) {}
+				res();
+			};
+			rq.onerror = () => rej(rq.error);
+			rq.onblocked = () => res(); // 被别的连接挡住也算"能开",不卡住诊断
+		});
+		out.idbMs = Date.now() - b;
+	} catch (e) {
+		out.idbMs = -1;
+	}
+	try {
+		// estimate() 报的是整个源的占用,与桶无关 —— 正好是我们要的"总字节"。
+		const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null;
+		if (est) {
+			out.usageMB = Math.round((est.usage || 0) / 1048576);
+			out.quotaMB = Math.round((est.quota || 0) / 1048576);
+		}
+	} catch (e) {}
+	return out;
+}
 
 // 【记忆化 caches.open:一次 SW 生命周期只开一次,不是每个请求开一次】
 // 原来三处分支(导航 / 清单 / 主分支)各自 `await caches.open(CACHE)`,等于每个 fetch 事件
@@ -507,11 +569,21 @@ self.addEventListener("fetch", event => {
 				// index.html 属代码,放代码桶。但**必须兜底查一次旧的素材桶**:老用户升到这一版时,
 				// 唯一那份首页还躺在旧桶里,新代码桶要等 install 装完才有 —— 中间那一瞬若读不到首页,
 				// 离线打开就直接 504 白屏。旧桶只在新桶没命中时才查,装齐后这一路永远不走。
+				// 【诊断】探针必须排在 openCode() **之前**:源级初始化的账谁先碰谁付,
+				// 排在后面就只会量到一个飞快的假数字。只在本实例第一次导航时跑。
+				if (!SWDIAG.probe) SWDIAG.probe = await runProbe();
+				const dProbe = Date.now();
 				// 【诊断】第一次碰 Cache Storage 的开销单独计时 —— 这是当前最大的嫌疑:
 				// WebKit 在 SW 冷启动后首次 open 时要把该源的缓存索引载入,而索引规模正比于
 				// 总条目数(15000 vs 700)。这能同时解释"只慢在导航阶段"和"缓存下得越全越慢"。
 				const cache = await openCode();
 				const dOpen = Date.now();
+				// 【诊断】两个桶各有多少条 —— "条目数"这个变量的实际值,和 usageMB 配对看。
+				// keys() 本身可能不便宜,故排在计时之后,不污染上面任何一项。
+				try {
+					SWDIAG.probe.codeEntries = (await cache.keys()).length;
+					SWDIAG.probe.assetEntries = (await (await openAsset()).keys()).length;
+				} catch (e) {}
 				// 多 key 尝试:缓存里 URL 可能是 /、/index.html、./index.html 中的任一种
 				// 【诊断】逐个 match 分开计时,才能看出是"第一下贵"(索引载入)还是"每下都贵"。
 				let hit = await cache.match(req);
@@ -533,7 +605,8 @@ self.addEventListener("fetch", event => {
 				SWDIAG.nav = {
 					swAgeMs: dEvent - SWDIAG.t0, // 事件到达时,这个 SW 实例已活了多久(≈0 = 冷启动)
 					evtAbs: dEvent, // 事件到达的绝对时刻(页面拿它减 fetchStart = 唤醒+派发开销)
-					openMs: dOpen - dEvent, // 首次 caches.open() —— 索引载入嫌疑
+					probeMs: dProbe - dEvent, // 三个探针合计(它排在 openCode 之前,故源级的账在这里付)
+					openMs: dOpen - dProbe, // 首次 caches.open() —— 索引载入嫌疑
 					m1Ms: dM1 - dOpen, // 第一次 match(req)
 					m2Ms: dM2 - dM1, // 第二次 match("/")
 					m34Ms: dM4 - dM2, // 第三四次 match

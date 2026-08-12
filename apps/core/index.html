@@ -594,8 +594,26 @@
 
 				// —— 判定:把上面几个数按阈值翻译成一句结论,免得又靠人眼猜 ——
 				// 阈值是启发式的,不是精确科学;它只负责指出"往哪儿查",证据仍是上面的原始数字。
+				// 探针那一行才是这次要的答案:Cache Storage 慢不慢 vs IndexedDB 慢不慢。
+				var pb = swd && swd.probe ? swd.probe : null;
+				var pbLine = pb
+					? '探针:caches.keys() ' + fmt(pb.keysMs) + ' | indexedDB.open() ' + fmt(pb.idbMs) + '\n' + '  条目 代码' + (pb.codeEntries === undefined ? '?' : pb.codeEntries) + ' + 素材' + (pb.assetEntries === undefined ? '?' : pb.assetEntries) + ' | 占用 ' + (pb.usageMB === undefined ? '?' : pb.usageMB + 'MB') + ' / ' + (pb.quotaMB === undefined ? '?' : pb.quotaMB + 'MB') + ' | 桶数 ' + (pb.buckets === undefined ? '?' : pb.buckets)
+					: '探针:无数据';
 				var verdict;
-				if (!sn) verdict = '取不到 SW 自报数据(/__swdiag 没通)—— 换版后重开一次再看';
+				// 【探针的结论排在最前面】它回答的是「搬家值不值」这个决策问题,比「慢在哪一段」更靠前:
+				// 慢在哪已经测清了(openCode 15.2s),现在缺的是「搬去 IndexedDB 到底有没有用」。
+				var pv = null;
+				if (pb && pb.idbMs >= 0 && pb.keysMs >= 0) {
+					// 【判据要用 keysMs,不能只看 openMs】探针跑在 openCode() 之前,源级初始化那笔账
+					// 谁先碰谁付 —— 现在是 caches.keys() 付了,于是 openMs 反而变得很小。
+					// 拿 openMs 判「Cache Storage 慢不慢」会直接漏判(自测时 A/B 两个场景都误判了)。
+					var cacheSlow = pb.keysMs > 3000 || (sn && sn.openMs > 3000) || (sn && sn.probeMs > 3000);
+					if (cacheSlow && pb.idbMs < 1000) pv = '★ Cache Storage 慢(' + fmt(pb.keysMs) + '/' + fmt(sn ? sn.openMs : 0) + ')而 IndexedDB 快(' + fmt(pb.idbMs) + ')—— 搬家有效,值得挨这一刀';
+					else if (cacheSlow && pb.idbMs >= 1000) pv = '☠ 两个都慢(IDB ' + fmt(pb.idbMs) + ')—— 别搬!换 IndexedDB 一样慢,省下重下 1GB';
+					else if (!cacheSlow) pv = '本次 Cache Storage 并不慢 —— 这次不是复现态(可能 SW 一直活着),重开一次再看';
+				}
+				if (pv) verdict = pv;
+				else if (!sn) verdict = '取不到 SW 自报数据(/__swdiag 没通)—— 换版后重开一次再看';
 				// 唤醒+派发:浏览器发起导航 → SW 收到事件。这一段里我们一行代码都没跑,
 				// 纯是系统唤醒/启动 SW 线程的成本。它大 = 真的是 iOS 系统层的账,改我们代码没用。
 				else if (wakeMs !== null && wakeMs > 3000) verdict = '唤醒+派发(系统启动 SW 线程)' + fmt(wakeMs) + ' —— 这段我们没有代码在跑';
@@ -604,7 +622,9 @@
 				else if (sn.openMs > 3000) verdict = '首次 caches.open() ' + fmt(sn.openMs) + ' —— 缓存索引载入,治法是导航路径别碰 Cache Storage';
 				else if (sn.m1Ms + sn.m2Ms + sn.m34Ms > 3000) verdict = '导航的 cache.match 共 ' + fmt(sn.m1Ms + sn.m2Ms + sn.m34Ms) + ' —— 治法是减少 key 尝试次数';
 				else if (sn.assetMs > 3000) verdict = '兜底查大素材桶 ' + fmt(sn.assetMs) + ' —— 满缓存下本不该走到,查代码桶为何没命中';
-				else if (sn.retMs !== undefined && sn.retMs - sn.openMs - sn.m1Ms - sn.m2Ms - sn.m34Ms - sn.assetMs > 3000) verdict = 'sanitizeResponse/交还响应 —— 查 redirected 洗白路径';
+				// 【这条的减法要扣掉 probeMs】retMs 是从「事件到达」起算的,而探针也在这区间里。
+				// 不扣就会把探针那 15 秒算成 sanitizeResponse 的账(自测时正是这么误报的)。
+				else if (sn.retMs !== undefined && sn.retMs - (sn.probeMs || 0) - sn.openMs - sn.m1Ms - sn.m2Ms - sn.m34Ms - sn.assetMs > 3000) verdict = 'sanitizeResponse/交还响应 —— 查 redirected 洗白路径';
 				else if (navDown > 3000) verdict = '传 HTML 本身 —— 查首页体积/网络';
 				else if (after > 3000 && busyPct < 40) verdict = "主线程(解析/执行 JS),不是 I/O —— " + busyPct + "% 时间才有请求在飞";
 				else if (after > 3000 && swSum > after * 0.5) verdict = "每请求过一遍 SW 的固定开销 × " + boot.length + " —— 治法是减少请求数";
@@ -613,12 +633,13 @@
 
 				// SW 自报的那一行才是这次的主角:导航那 15 秒到底切成了哪几块。
 				var swLine = sn
-					? '  唤醒+派发 ' + (wakeMs === null ? '?' : fmt(wakeMs)) + ' | open ' + fmt(sn.openMs) + ' | match ' + fmt(sn.m1Ms) + '/' + fmt(sn.m2Ms) + '/' + fmt(sn.m34Ms) + ' | 素材桶 ' + fmt(sn.assetMs) + ' | 交还 ' + fmt(sn.retMs === undefined ? 0 : sn.retMs) + (sn.hit ? '' : ' 未命中!') + '\n  SW实例已活 ' + fmt(sn.swAgeMs) + '(≈0=本次冷启动)'
+					? '  唤醒+派发 ' + (wakeMs === null ? '?' : fmt(wakeMs)) + ' | 探针 ' + fmt(sn.probeMs === undefined ? 0 : sn.probeMs) + ' | open ' + fmt(sn.openMs) + ' | match ' + fmt(sn.m1Ms) + '/' + fmt(sn.m2Ms) + '/' + fmt(sn.m34Ms) + ' | 素材桶 ' + fmt(sn.assetMs) + ' | 交还 ' + fmt(sn.retMs === undefined ? 0 : sn.retMs) + (sn.hit ? '' : ' 未命中!') + '\n  SW实例已活 ' + fmt(sn.swAgeMs) + '(≈0=本次冷启动)'
 					: '  (SW 自报数据取不到)';
 				var head =
 					(hung ? '⚠启动未完成(30s兜底) ' : '') +
 					'总 ' + fmt(bootMs) + ' = 首页 ' + fmt(htmlAt) + ' + 之后 ' + fmt(after) + '\n' +
 					'首页拆解(SW自报):\n' + swLine + '\n' +
+					 pbLine + '\n' +
 					'之后 ' + fmt(after) + ' 里有请求在飞 ' + fmt(busy) + '(' + busyPct + '%)\n' +
 					'请求 ' + boot.length + '(过SW ' + fromSW + ') | SW累计 ' + swSum + ' | ' + bytes + '\n' +
 					'脚本执行于 ' + fmt(scriptAt) + '(校验 首页 ' + fmt(htmlAt) + ')\n' +
