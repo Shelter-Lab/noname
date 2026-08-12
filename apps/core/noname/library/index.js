@@ -8855,7 +8855,13 @@ export class Library {
 			// 夜间刀人/查验/用药那步。故不摆可玩的配置项，只摆两条说明，让人在点「启」之前
 			// 就知道要去联机。真正的兜底拦截仍在 mode/langrensha/index.js 的 start 里。
 			config: {
-				dierestart: false,
+				// 【config 里每一项都必须是配置对象，不能是裸值】这儿曾写过 `dierestart: false`，
+				// 直接把启动链搞崩：startMenu.js:215 遍历 info.config 时对每项 get.copy(x) 再
+				// cfg._name = j —— get.copy(false) 返回 false，给布尔赋属性就抛
+				// "Cannot create property '_name' on boolean 'false'"，启动链被打断，
+				// 撞 30s 看门狗弹「游戏似乎未正常载入，是否重置」。
+				// identity/guozhan 的 dierestart 都是完整对象({name,init,onclick})；本模式仅联机可玩，
+				// 单机的「死亡后显示重来」用不上，故直接不写这一项。
 				// 不能带 clear:true —— 那会走 menu/index.js:217 那条分支，跳过 lib.setIntro，
 				// 说明文字就没地方显示了。走默认分支才有长按/悬停弹出的说明框。
 				langrensha_onlyol_notice: {

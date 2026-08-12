@@ -212,6 +212,13 @@ export const startMenu = function (connectMenu) {
 					if (j === "update") {
 						continue;
 					}
+					// 【非配置对象一律跳过】config 里理应每项都是 {name,init,...}，但写错成裸值
+					// (如 dierestart: false)时，下面 cfg._name = j 会对布尔赋属性直接抛 TypeError，
+					// 把整条启动链打断 → 撞 30s 看门狗弹「游戏似乎未正常载入」。一个模式的配置笔误
+					// 不该让整个游戏起不来，故在这儿兜住。(狼人杀 config 曾踩过，见 library/index.js)
+					if (!infoconfig[j] || typeof infoconfig[j] !== "object") {
+						continue;
+					}
 					var cfg = get.copy(infoconfig[j]);
 					cfg._name = j;
 					cfg.mode = mode;
