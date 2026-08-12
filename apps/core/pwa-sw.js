@@ -99,7 +99,15 @@ async function runProbe() {
 	}
 	try {
 		// estimate() 报的是整个源的占用,与桶无关 —— 正好是我们要的"总字节"。
+		// 【也要单独计时】WebKit 的配额核算(OriginQuotaManager::getUsageFunction)是
+		// IDB + CacheStorage + FileSystem 三者相加,其中 CacheStorage 那项在没有
+		// estimatedsize 缓存文件时会退化成递归遍历整个 origin 目录。所以它是**另一条**
+		// 也会随条目数变慢的路径。已知 keysMs 独占 15.6s(它压根不碰配额),故元凶是
+		// caches.keys() 那条全量扫;但 estMs 若同样很大,说明 pack 化还得考虑这条路径
+		// (它连 -blob 实体文件都要 stat,收益要重算)。分开量,别再靠猜。
+		const c = Date.now();
 		const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null;
+		out.estMs = Date.now() - c;
 		if (est) {
 			out.usageMB = Math.round((est.usage || 0) / 1048576);
 			out.quotaMB = Math.round((est.quota || 0) / 1048576);

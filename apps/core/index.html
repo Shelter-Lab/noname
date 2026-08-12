@@ -597,7 +597,7 @@
 				// 探针那一行才是这次要的答案:Cache Storage 慢不慢 vs IndexedDB 慢不慢。
 				var pb = swd && swd.probe ? swd.probe : null;
 				var pbLine = pb
-					? '探针:caches.keys() ' + fmt(pb.keysMs) + ' | indexedDB.open() ' + fmt(pb.idbMs) + '\n' + '  条目 代码' + (pb.codeEntries === undefined ? '?' : pb.codeEntries) + ' + 素材' + (pb.assetEntries === undefined ? '?' : pb.assetEntries) + ' | 占用 ' + (pb.usageMB === undefined ? '?' : pb.usageMB + 'MB') + ' / ' + (pb.quotaMB === undefined ? '?' : pb.quotaMB + 'MB') + ' | 桶数 ' + (pb.buckets === undefined ? '?' : pb.buckets)
+					? '探针:caches.keys() ' + fmt(pb.keysMs) + ' | indexedDB.open() ' + fmt(pb.idbMs) + ' | estimate() ' + fmt(pb.estMs === undefined ? 0 : pb.estMs) + '\n' + '  条目 代码' + (pb.codeEntries === undefined ? '?' : pb.codeEntries) + ' + 素材' + (pb.assetEntries === undefined ? '?' : pb.assetEntries) + ' | 占用 ' + (pb.usageMB === undefined ? '?' : pb.usageMB + 'MB') + ' / ' + (pb.quotaMB === undefined ? '?' : pb.quotaMB + 'MB') + ' | 桶数 ' + (pb.buckets === undefined ? '?' : pb.buckets)
 					: '探针:无数据';
 				var verdict;
 				// 【探针的结论排在最前面】它回答的是「搬家值不值」这个决策问题,比「慢在哪一段」更靠前:
