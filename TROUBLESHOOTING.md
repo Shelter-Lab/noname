@@ -638,17 +638,25 @@ iOS 不许 SW 返回 redirected 响应(`sanitizeResponse`)、后台 install 被�
 | `apps/core/noname/init/browser.js` | ①文件接口退回 URL + IndexedDB(纯静态模式) ②`fetchWithTimeout` + `checkFile` 的 HEAD 探测带 2s 超时(治 standalone 离线卡 60s) | 探测文件服务器 + 读写走 fetch/IndexedDB 还在吗;**HEAD 还带着超时吗** |
 | `apps/core/noname/init/index.ts` | ①启动超时 30s ②`sandboxEnabled = false` **无条件**跳过沙盒(2026-08-11 从"仅 iOS 跳过"扩大而来,治桌面/安卓离线 60s 白屏,见第五节病因四) | 这两处还在吗;**上游若要真启用沙盒,必须先解决 iframe 绕过 SW 的问题** |
 | `apps/core/index.html` | ①localStorage 内存兜底 ②PWA meta/SW 注册 ③onerror 忽略 NotAllowedError ④QUERY_PRECACHE | 这几段内联脚本还在吗 |
-| `apps/core/pwa-sw.js` | (新增文件)缓存策略 + `missTimeoutMs` 超时分档 + `failStreak` 离线启发式 + `ALWAYS_404` 短路 + install 失败保戳记 `STALE_KEY` + `assetRevalidateWindow`(素材每构建只校验一次) | 上游不会动,但改它前必读本文档「断网白屏根治方案」和第五节 |
-| `scripts/build.ts` | 核心清单:剔掉 `service-worker.js`/eslint-linter/废弃 vue 兼容层;补进 `image/pwa`+根图标+11 张 splash+`ol_bg`/`handcard`/`tiesuo_mark` | 收录判据见第五节「核心清单的收录判据」,别凭直觉加减 |
+| `apps/core/pwa-sw.js` | (新增文件)缓存策略 + `missTimeoutMs` 超时分档 + `failStreak` 离线启发式 + `ALWAYS_404` 短路 + install 失败保戳记 `STALE_KEY` + `assetRevalidateWindow`(素材每构建只校验一次,**校验结果写 IndexedDB**) | 上游不会动,但改它前必读本文档「断网白屏根治方案」、第五节,以及**病因七** |
+| `apps/core/pwa-asset-db.js` | (新增文件)素材仓库(IndexedDB)。**素材不再进 Cache Storage** —— 见病因七 | 上游不会动。改它前先读病因七的「红线」:只存 ArrayBuffer 绝不存 Blob;任何往 Cache Storage 写素材的代码都会把那 15.8 秒养回来 |
+| `scripts/build.ts` | 核心清单:剔掉 `service-worker.js`/eslint-linter/废弃 vue 兼容层;补进 11 张 splash + `ol_bg`/`handcard`/`tiesuo_mark` + 基础字体。**PWA 图标不进核心**(见代码注释,71333e1 加进来是白占,已撤) | 收录判据见第五节,别凭直觉加减 |
 | `apps/core/noname/entry.ts` | 无改动,但 `await import("/preload.js")` 这个**故意失败**的探测被 `ALWAYS_404` 短路了 | 上游若改了平台分派方式(不再靠 import 失败),要同步删掉 `ALWAYS_404` 里的 `/preload.js`,否则会挡住真实文件 |
 | `apps/core/noname/game/index.js` | ①createServer/connect 的 PeerJS 分流 ②createServer 开头 `if(!lib.node)lib.node={}` | 联机 P2P 分流还在吗 |
 | `apps/core/noname/library/element/content.ts` | waitForPlayer 改 `await game.createServer()` | 还在吗 |
 | `apps/core/mode/connect.js` | 「创建房间」按钮 + 不弹邀请链接 confirm | 还在吗 |
-| `apps/core/noname/library/init/index.js` | 下载离线资源(downloadOfflineAssets)增量补课 | 还在吗 |
+| `apps/core/noname/library/init/index.js` | 下载离线资源(downloadOfflineAssets)增量补课;**素材写 IndexedDB、代码写 Cache Storage**(见病因七) | 还在吗;分流判据(`isCodeAsset`)必须与 `pwa-sw.js` 严格一致 —— 写进 A、从 B 读 = 等于没缓存 |
 | `apps/core/noname/ui/create/index.js` | 分享文本改房间号引导 | 还在吗 |
 | `apps/core/noname/ui/create/menu/pages/otherMenu.js` | 检查更新按钮 + 双主页链接 | 还在吗 |
-| `scripts/build.ts` | ①产物校验 ②生成 pwa-core/all-assets.json(含 dist 根散文件) ③`NOT_CORE` 剔大块头 + 补 PWA 图标进核心 | 清单生成还在吗;`NOT_CORE` 的三条理由是否仍成立(见第五节「核心清单的收录判据」) |
+| `scripts/build.ts` | ①产物校验 ②生成 pwa-core/all-assets.json(含 dist 根散文件) ③`NOT_CORE` 剔大块头 ④**素材库出两份产物**:`pwa-asset-db.js`(classic,给 SW 的 importScripts)+ `pwa-asset-db-esm.js`(ESM,给页面 import),并校验导出名齐全 | 清单生成还在吗;`NOT_CORE` 三条理由是否仍成立;**改 `pwa-asset-db.js` 的函数名要同步 `dbExports` 数组**,否则构建直接抛错(那是故意的:免得导出一个不存在的名字让页面 import 静默失败) |
 | `apps/core/character/{bingshi,clan,huicui,mobile,newjiang,onlyOL,refresh,sb,sp,xianding}/character.js` | 给 35 个无立绘武将插 `img:` 字段(消除剪影),搜注释 `无自有立绘,复用同一人物的本体立绘` 可定位全部 | 跑 `node scripts/audit-character-images.cjs`,应报"零剪影"。**上游若补了真图,删掉我们的 `img:` 行**。详见 [docs/CHARACTER-IMAGES.md](./docs/CHARACTER-IMAGES.md) |
 | `apps/core/index.html` | ①`window.onerror`/`onunhandledrejection` 遇模块混版措辞让路给 `__pwaRepair()` ②缓存自修复 IIFE(约 200 行) | **上游若重排内联 `<script>` 块顺序,必须重查**:自修复靠"内联脚本已同步执行完、`entry.ts` 在文件末尾才加载"才保证 `__pwaRepair` 已定义;且属性式 `onerror` 若又排到自修复前面而没有让路判断,自修复会再次形同虚设(病因六第一层) |
 | `apps/core/pwa-sw.js` | install 主循环与重试轮对 `index.html` 额外 `cache.put("/")` | 导航分支的 key 匹配顺序若变,这里要跟着改(病因六第二层)。**别删** —— 删了改 `index.html` 的修复要开两次 App 才生效 |
-| 新增文件(不会冲突) | `pwa-sw.js`、`manifest.webmanifest`、`peerAdapter.js`、`wrangler.jsonc`、`image/pwa/*`、本文档、README-PWA.md | 上游不会动,一般安全 |
+| 新增文件(不会冲突) | `pwa-sw.js`、`pwa-asset-db.js`、`manifest.webmanifest`、`peerAdapter.js`、`wrangler.jsonc`、`image/pwa/*`、本文档、README-PWA.md | 上游不会动,一般安全 |
+
+**★ 2026-08-12 实测:上游那 20 个 commit 一个 PWA 文件都没碰。** 108 个改动文件全是内容
+(`audio/skill` 20、`image/character` 13、`character/*` 37、`typings`/`mode` 各 2),
+`pwa-*` / `sw.js` / `manifest` / `build.ts` / `index.html` / `library/init` **零命中**。
+原因很简单:PWA 那套整个是本 fork 新增的,上游仓库里压根没有这些文件。
+**所以本清单不必每次同步都逐条核** —— 先 `git diff --name-only HEAD...upstream/main`
+过一遍上表的文件名,有命中才核对。没命中就是纯内容合并,放心合。

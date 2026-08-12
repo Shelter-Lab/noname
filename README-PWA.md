@@ -19,16 +19,52 @@
 
 ### 2. PWA 外壳
 - `apps/core/manifest.webmanifest`：可安装、独立窗口、图标
-- `apps/core/pwa-sw.js`：Service Worker 离线缓存（stale-while-revalidate + install 预缓存核心 ~32MB）
+- `apps/core/pwa-sw.js`：Service Worker 离线缓存（install 预缓存核心 ~32MB）
+- `apps/core/pwa-asset-db.js`：**素材仓库（IndexedDB）**，见下节「存储分工」
 - 处理了 iOS 特有坑：重定向响应洗白（`response has redirections` 白屏）、localStorage 为 null 兜底、
   冷启动超时与失败自动重试
 
-### 3. 离线资源下载
-- 选项菜单加「下载离线资源」按钮：批量缓存全部立绘/语音（约 1GB），
-  跳过已缓存（续传）、显示进度、完成后锁定、处理 iOS 配额上限
-- 构建时生成 `pwa-core-assets.json`（核心预缓存清单）和 `pwa-all-assets.json`（全量可下载清单）
+### 3. 存储分工：代码在 Cache Storage，素材在 IndexedDB
 
-### 4. 房间号 P2P 联机（PWA 也能当房主）
+**这不是设计洁癖，是踩了「iOS 冷启动 15.8 秒」才换的架构**
+（完整推导见 [TROUBLESHOOTING 病因七](./TROUBLESHOOTING.md)）：
+
+| | 装什么 | 数量 |
+|---|---|---|
+| **Cache Storage**（`noname-code-v1`） | 代码 + 启动路径上的 103 个小素材（splash / 主菜单背景 / 卡牌框 / 基础字体） | ~746 条 |
+| **IndexedDB**（`noname-assets`） | 立绘、语音、内置扩展、花体字 | 清单 ~14300 条 |
+
+**为什么必须分开**：WebKit 的 `caches.open()` 会扫**该 origin 下每个桶的每一条 record 文件**
+（源码 `CacheStorageManager::allCaches` 里 `for (每个桶) cache->open()`），而磁盘上没有 record 级
+索引，所以这笔账每次冷启动都要重付。实测 21307 条（含约 6000 条改名/下架后没人清理的历史残留，故比清单数大）× ≈0.74ms
+= **15.8 秒，且全花在交出
+index.html 之前**（总 16.4s 里首页占 15.7s）。成本正比于**条目数**、与总字节无关
+（扫描跳过大 body 实体）—— 故**拆桶无效**（已实测 + 源码双证）、**压缩体积无效**，
+唯一杠杆是把素材挪出 Cache Storage。Chromium 有持久化索引，同条件下只要几十毫秒，
+所以桌面上压根看不出这个问题。
+
+代码留在 Cache Storage 是因为它要「整版原子一致」（产物文件名不带 hash，必须整批换，
+否则新旧 chunk 混搭直接白屏），而 746 条不构成成本。
+
+**改这块前必读两条红线**：
+1. **素材只存 ArrayBuffer，绝不存 Blob** —— WebKit 下 IDB 里的 Blob 会每个落成一个独立
+   `.blob` 文件，等于把「万文件」问题原样搬回来；且 iOS 有至今未修的 Blob 损坏 bug。
+2. **任何往 Cache Storage 写素材的代码都会把那 15.8 秒悄悄养回来** ——
+   而且它连"有用"都算不上：SW 只从 IDB 读素材，写进 Cache Storage 是个没人读的副本。
+
+### 4. 离线资源下载与更新
+- 选项菜单加「下载离线资源」按钮：批量缓存全部立绘/语音（约 1GB），
+  跳过已有（续传）、显示进度、处理 iOS 配额上限
+- 构建时生成 `pwa-core-assets.json`（核心预缓存清单）和 `pwa-all-assets.json`（全量可下载清单）
+- **访问即缓存**：联网玩过一局，那局出现的立绘/语音自动进素材库，之后离线可复玩
+- **素材更新**：换版后第一次访问某素材时后台问一次「变了没」——
+  我们**不比对内容**，靠 HTTP 的 `If-None-Match`（CF 静态托管给每个文件发 ETag）：
+  没变回 304 零字节、不写；真变了回 200 才覆盖。每个构建只开一次窗，
+  否则每次冷启动都是几十个白发的请求（离线时更要各等满超时）
+- **写入失败会如实弹窗**（iOS 有个未修的 IDB 写入间歇失败 bug），再点一次可补齐 ——
+  默默报「完成」而实际少素材，表现成"玩到那里才发现是剪影"，比当场说出来难查得多
+
+### 5. 房间号 P2P 联机（PWA 也能当房主）
 官方开服用 `require("ws")`，纯浏览器开不了服。新增 **PeerJS（WebRTC P2P）传输后端**：
 - `apps/core/noname/library/element/peerAdapter.js`：把 PeerJS DataConnection 适配成 WebSocket 对象，
   上层联机逻辑（房主权威 + 消息协议）**零改动**
@@ -39,10 +75,10 @@
 **用法**：创建房间 → 选模式 → 点「启」→ 等待界面显示房间号 → 对方在地址栏输房间号加入。
 （单机全模式：身份/国战/乱斗/斗地主/BOSS/塔防等离线可玩。）
 
-### 5. 手动检查更新
+### 6. 手动检查更新
 「其它 → 更新」界面加「检查更新」按钮（纯手动），PWA 下拉取最新版并刷新，缓存保留。
 
-### 6. 网页扩展（自建武将）
+### 7. 网页扩展（自建武将）
 本体「扩展 → 制作扩展」在纯静态部署下**重启即失效**：它生成的扩展代码要靠原生 `import()` 去 fetch
 `/extension/<名>/extension.js`，这个路径在 CDN 上不存在。
 
@@ -65,7 +101,7 @@
 > 都得自己覆盖成 `relative`，否则糊成一坨；`get.infoHp("4")` 对纯数字字符串返回 **0**，
 > 存之前必须先 `parseInt`（本体 `exetensionMenu.js:1191` 也是这么干的）。
 
-### 7. 补齐缺失的武将立绘（消除剪影）
+### 8. 补齐缺失的武将立绘（消除剪影）
 上游有一批武将**没有自己的立绘文件**，游戏会回落成性别剪影
 （[polyfill.ts](apps/core/noname/init/polyfill.ts) 给 `backgroundImage` 塞两个 url，
 第二个是 `default_silhouette_{sex}.jpg`，CSS 多背景自动兜底）。本 fork 全部补齐，详见
