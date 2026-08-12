@@ -470,13 +470,19 @@
 		// 【为什么不用 console】standalone 下看不到控制台,而接 Mac 的 Web Inspector 不是人人有。
 		(function () {
 			"use strict";
-			// 【别用 performance.now() 当起点 —— 第一版就栽在这】now() 的原点是**导航开始**,
-			// 而这段内联脚本要等 SW 把 index.html 吐出来才执行。若 SW 花十几秒才给首页,t0 本身
-			// 已经是 14000,bootDone - t0 仍只有几百毫秒 —— 等于把最慢那段整个减掉。
-			// 实测正是如此:面板报 470ms,人等了 15 秒。故起点固定为 0(= 导航开始)。
-			var t0 = 0;
+			// 【起点固定为 0(=导航开始),绝不用 performance.now() 当基准】
+			// now() 的原点就是导航开始,而这段内联脚本要等 SW 把 index.html 吐出来才执行 ——
+			// 若 SW 花十几秒才给首页,now() 本身已经是 14000,拿它当 t0 等于把最慢那段整个减掉。
+			// 实测正是如此:面板报 470ms,人等了 15 秒。这一版所有时刻都以导航开始为零点。
+			// 顺带:这一行执行的时刻本身就是"首页到手且已解析到这里"的独立证据,留作交叉校验 ——
+			// 它若与 navigation.responseEnd 差很多,说明 HTML 传完到脚本执行之间还有一段被吃掉了。
+			var scriptAt = performance.now();
 			var entries = [];
 			try {
+				// 【必须放开资源缓冲区】默认只有 250 条,而冷启动有 600+ 个请求。observe 之前
+				// 已经发生的请求靠 buffered:true 回填,可缓冲区早被挤爆 —— 统计出的"请求数"
+				// 会凭空少掉几百个,而"请求数"正是判断瓶颈的核心数字之一。
+				if (performance.setResourceTimingBufferSize) performance.setResourceTimingBufferSize(5000);
 				new PerformanceObserver(function (list) {
 					list.getEntries().forEach(function (e) {
 						entries.push(e);
@@ -486,81 +492,210 @@
 				return; // 不支持就算了,诊断面板不该影响启动
 			}
 			function fmt(ms) {
+				if (!isFinite(ms) || ms < 0) return "?";
 				return ms < 1000 ? Math.round(ms) + "ms" : (ms / 1000).toFixed(1) + "s";
 			}
-			function show() {
+			/**
+			 * 【这一项才是分辨"等 I/O"还是"主线程算不动"的判据】
+			 * 求"至少有一个请求在飞"的时长**并集**(不是求和 —— 求和永远大于墙钟,说明不了任何事)。
+			 * 若某段窗口里墙钟 14 秒、并集只有 1 秒,那 13 秒就压根没在等网络/缓存,
+			 * 而是卡在主线程解析执行 JS —— 这两种病的治法完全相反,以前一直没法区分。
+			 */
+			function unionMs(list, from, to) {
+				var iv = [];
+				list.forEach(function (e) {
+					var a = Math.max(e.startTime, from);
+					var b = Math.min(e.startTime + e.duration, to);
+					if (b > a) iv.push([a, b]);
+				});
+				if (!iv.length) return 0;
+				iv.sort(function (x, y) {
+					return x[0] - y[0];
+				});
+				var sum = 0,
+					cs = iv[0][0],
+					ce = iv[0][1];
+				for (var i = 1; i < iv.length; i++) {
+					if (iv[i][0] > ce) {
+						sum += ce - cs;
+						cs = iv[i][0];
+						ce = iv[i][1];
+					} else if (iv[i][1] > ce) {
+						ce = iv[i][1];
+					}
+				}
+				return sum + (ce - cs);
+			}
+			function swOf(e) {
+				return e.workerStart > 0 && e.responseStart > e.workerStart ? e.responseStart - e.workerStart : 0;
+			}
+			function show(swd) {
 				var bootMs = window.__bootDoneAt || performance.now();
+				var hung = !window.__bootDoneAt; // 30 秒兜底触发的:启动压根没跑完,数字要标出来
 				// 只统计首屏之前发出的请求 —— 之后的是玩游戏时按需加载的,不算启动成本
 				var boot = entries.filter(function (e) {
 					return e.startTime <= bootMs;
 				});
+
+				// —— 第一刀:导航阶段本身拆开 ——
+				// 【为什么必须拆到这个粒度】"首页花了 14 秒"这句话有三种完全不同的病因,
+				// 治法互不相干,而以前只有一个总数,没法区分:
+				//   · fetchStart→workerStart = 浏览器**唤醒/启动 SW** 的时间(iOS 上 SW 被回收后
+				//     要重新解析执行整个 pwa-sw.js 才能派发 fetch 事件)→ 治法是减小 SW 启动开销
+				//   · workerStart→responseStart = SW **处理**这个导航请求(开缓存桶、match、兜底
+				//     多个 key、可能还等网络)→ 治法在导航分支的代码里
+				//   · responseStart→responseEnd = 真正传 HTML 的时间 → 治法是别让首页太大
+				var nav = performance.getEntriesByType("navigation")[0];
+				var navDown = nav && nav.responseEnd > nav.responseStart ? nav.responseEnd - nav.responseStart : 0;
+				// 【导航阶段改用 SW 自己报的数,不用 workerStart】iOS/WebKit 不填 workerStart
+				// (实测「过SW 0」而请求 645),拿它拆等于全 0 做除法。SW 与页面共享墙钟,故
+				// 唤醒+派发开销 = SW 收到事件的绝对时刻 − 浏览器发起导航的绝对时刻。
+				// 这一项是判「iOS 系统层硬伤」还是「我们代码里的开销」的唯一判据。
+				var sn = swd && swd.nav ? swd.nav : null;
+				var navFetchAbs = nav ? performance.timeOrigin + nav.fetchStart : 0;
+				var wakeMs = sn && navFetchAbs ? sn.evtAbs - navFetchAbs : null;
+				var htmlAt = nav ? nav.responseEnd : scriptAt;
+				var after = Math.max(0, bootMs - htmlAt);
+
+				// —— 第二刀:HTML 之后那段,到底在等 I/O 还是在烧主线程 ——
+				var busy = unionMs(boot, htmlAt, bootMs);
+				var busyPct = after > 0 ? Math.round((busy / after) * 100) : 0;
+
+				// 【WebKit 缺字段就如实说「缺失」,绝不显示 0】实测 iOS 上 workerStart /
+				// transferSize / decodedBodySize 全不填。上一版把它们当 0 显示,于是报出
+				// 「过SW 0 / SW累计 0ms / 0.00MB」而请求数是 645 —— 而缓存命中本来就必须过 SW
+				// (Cache Storage 只有 SW 和页面 JS 能读,浏览器自己不会去查),0 在物理上不可能。
+				// 这种「看起来像数据的 0」最坑人:它会把人往完全错误的方向带(已经带错过一轮)。
+				// 故一律区分「真的是 0」和「压根没这个字段」。
+				var hasWS = boot.some(function (e) {
+					return e.workerStart > 0;
+				});
+				var fromSW = hasWS
+					? String(
+							boot.filter(function (e) {
+								return e.workerStart > 0;
+							}).length
+					  )
+					: '字段缺失';
+				var swSum = hasWS
+					? fmt(
+							boot.reduce(function (s, e) {
+								return s + swOf(e);
+							}, 0)
+					  )
+					: '字段缺失';
+				// 【字节数用 decodedBodySize,不用 transferSize】WebKit 上 transferSize 大量返回 0
+				// (上一版就因此报出「缓存 0 / 网络 144」而总数是 646,自相矛盾)。decoded 至少
+				// 反映"真的搬了多少数据",但它不区分来自网络还是 Cache Storage,故只当量级看。
+				var rawBytes = boot.reduce(function (s, e) {
+					return s + (e.decodedBodySize || e.transferSize || 0);
+				}, 0);
+				var bytes = rawBytes > 0 ? (rawBytes / 1048576).toFixed(1) + 'MB' : '字段缺失';
+
+				// —— 判定:把上面几个数按阈值翻译成一句结论,免得又靠人眼猜 ——
+				// 阈值是启发式的,不是精确科学;它只负责指出"往哪儿查",证据仍是上面的原始数字。
+				var verdict;
+				if (!sn) verdict = '取不到 SW 自报数据(/__swdiag 没通)—— 换版后重开一次再看';
+				// 唤醒+派发:浏览器发起导航 → SW 收到事件。这一段里我们一行代码都没跑,
+				// 纯是系统唤醒/启动 SW 线程的成本。它大 = 真的是 iOS 系统层的账,改我们代码没用。
+				else if (wakeMs !== null && wakeMs > 3000) verdict = '唤醒+派发(系统启动 SW 线程)' + fmt(wakeMs) + ' —— 这段我们没有代码在跑';
+				// 首次 caches.open():当前最大嫌疑。WebKit 在 SW 冷启动后第一次开缓存要把该源的
+				// 索引载入,而索引规模正比于总条目数 —— 这能同时解释「只慢在导航阶段」和「下得越全越慢」。
+				else if (sn.openMs > 3000) verdict = '首次 caches.open() ' + fmt(sn.openMs) + ' —— 缓存索引载入,治法是导航路径别碰 Cache Storage';
+				else if (sn.m1Ms + sn.m2Ms + sn.m34Ms > 3000) verdict = '导航的 cache.match 共 ' + fmt(sn.m1Ms + sn.m2Ms + sn.m34Ms) + ' —— 治法是减少 key 尝试次数';
+				else if (sn.assetMs > 3000) verdict = '兜底查大素材桶 ' + fmt(sn.assetMs) + ' —— 满缓存下本不该走到,查代码桶为何没命中';
+				else if (sn.retMs !== undefined && sn.retMs - sn.openMs - sn.m1Ms - sn.m2Ms - sn.m34Ms - sn.assetMs > 3000) verdict = 'sanitizeResponse/交还响应 —— 查 redirected 洗白路径';
+				else if (navDown > 3000) verdict = '传 HTML 本身 —— 查首页体积/网络';
+				else if (after > 3000 && busyPct < 40) verdict = "主线程(解析/执行 JS),不是 I/O —— " + busyPct + "% 时间才有请求在飞";
+				else if (after > 3000 && swSum > after * 0.5) verdict = "每请求过一遍 SW 的固定开销 × " + boot.length + " —— 治法是减少请求数";
+				else if (after > 3000) verdict = "请求 I/O 本身(" + busyPct + "% 时间有请求在飞)";
+				else verdict = "启动没有明显瓶颈(总 " + fmt(bootMs) + ")";
+
+				// SW 自报的那一行才是这次的主角:导航那 15 秒到底切成了哪几块。
+				var swLine = sn
+					? '  唤醒+派发 ' + (wakeMs === null ? '?' : fmt(wakeMs)) + ' | open ' + fmt(sn.openMs) + ' | match ' + fmt(sn.m1Ms) + '/' + fmt(sn.m2Ms) + '/' + fmt(sn.m34Ms) + ' | 素材桶 ' + fmt(sn.assetMs) + ' | 交还 ' + fmt(sn.retMs === undefined ? 0 : sn.retMs) + (sn.hit ? '' : ' 未命中!') + '\n  SW实例已活 ' + fmt(sn.swAgeMs) + '(≈0=本次冷启动)'
+					: '  (SW 自报数据取不到)';
+				var head =
+					(hung ? '⚠启动未完成(30s兜底) ' : '') +
+					'总 ' + fmt(bootMs) + ' = 首页 ' + fmt(htmlAt) + ' + 之后 ' + fmt(after) + '\n' +
+					'首页拆解(SW自报):\n' + swLine + '\n' +
+					'之后 ' + fmt(after) + ' 里有请求在飞 ' + fmt(busy) + '(' + busyPct + '%)\n' +
+					'请求 ' + boot.length + '(过SW ' + fromSW + ') | SW累计 ' + swSum + ' | ' + bytes + '\n' +
+					'脚本执行于 ' + fmt(scriptAt) + '(校验 首页 ' + fmt(htmlAt) + ')\n' +
+					'判定:' + verdict;
+
+				// —— 存一份历史:用户要"关掉再开两次"对比,而面板一刷新就没了 ——
+				// 【为什么套 try】standalone 下 localStorage 可能退化(见本文件顶部兜底),读写都可能抛。
+				var hist = [];
+				try {
+					hist = JSON.parse(localStorage.getItem("__pwa_diag_hist") || "[]");
+					if (!Array.isArray(hist)) hist = [];
+					hist.push(fmt(bootMs) + ' 首页' + fmt(htmlAt) + (sn ? '(醒' + (wakeMs === null ? '?' : fmt(wakeMs)) + '/开' + fmt(sn.openMs) + '/配' + fmt(sn.m1Ms + sn.m2Ms + sn.m34Ms) + ')' : '') + ' 之后' + fmt(after) + ' 飞' + busyPct + '% 请求' + boot.length);
+					while (hist.length > 6) hist.shift();
+					localStorage.setItem("__pwa_diag_hist", JSON.stringify(hist));
+				} catch (e) {}
+
 				var slow = boot.slice().sort(function (a, b) {
 					return b.duration - a.duration;
 				});
-				// 【第一版的 hit/net 分类是错的】拿 transferSize/decodedBodySize 判命中,但 WebKit 上
-				// 这两个字段大量返回 0 —— 实测出现「请求 646 (缓存 0 / 网络 144)」,0+144≠646。
-				// 改用 workerStart:>0 就说明该请求确实进了 SW,这个字段可靠;而且
-				// responseStart-workerStart 正好是 SW 处理它的耗时。
-				// 注意 iOS 上部分字段可能缺失,故只做粗分类,不当精确数字用。
-				var fromSW = boot.filter(function (e) {
-					return e.workerStart > 0;
-				}).length;
-				var net = boot.filter(function (e) {
-					return e.transferSize > 0;
-				});
-				var bytes = net.reduce(function (s, e) {
-					return s + (e.transferSize || 0);
-				}, 0);
-				var box = document.createElement("div");
-				box.setAttribute(
-					"style",
-					"position:fixed;left:0;top:0;z-index:2147483646;background:rgba(0,0,0,.82);color:#0f0;" +
-						"font:11px/1.5 monospace;padding:4px 6px;max-width:100vw;max-height:60vh;overflow:auto;white-space:pre;"
-				);
-				// 把「拿到 HTML」这一刀切出来:导航阶段(含 SW 处理导航请求)vs 之后的模块加载。
-				// 15 秒花在 SW 吐首页之前还是之后,治法完全不同,这一刀是关键。
-				var nav = performance.getEntriesByType("navigation")[0];
-				var htmlAt = nav ? nav.responseEnd : 0;
-				// SW 里排队+处理的累计。若它接近墙钟,瓶颈就是「每请求过一遍 SW」,与缓存条数无关。
-				var swMs = boot.reduce(function (s2, e) {
-					return s2 + (e.workerStart > 0 && e.responseStart > e.workerStart ? e.responseStart - e.workerStart : 0);
-				}, 0);
-				var head =
-					"总 " + fmt(bootMs) + " = 首页 " + fmt(htmlAt) + " + 之后 " + fmt(bootMs - htmlAt) +
-					" | 请求 " + boot.length + " (过SW " + fromSW + ")" +
-					" | " + (bytes / 1048576).toFixed(2) + "MB | SW累计 " + fmt(swMs) +
-					"\n点此展开最慢 15 条";
-				box.textContent = head;
-				var open = false;
-				box.addEventListener("click", function () {
-					open = !open;
-					if (!open) {
-						box.textContent = head;
-						return;
-					}
+				var full = function () {
 					var lines = slow.slice(0, 15).map(function (e) {
 						var name = e.name.replace(location.origin, "");
-						if (name.length > 46) name = "…" + name.slice(-45);
-						var sw = e.workerStart > 0 && e.responseStart > e.workerStart ? e.responseStart - e.workerStart : 0;
-						return fmt(e.duration).padStart(6) + " sw" + fmt(sw).padStart(6) + "  " + name;
+						if (name.length > 42) name = "…" + name.slice(-41);
+						return fmt(e.duration).padStart(6) + " sw" + fmt(swOf(e)).padStart(6) + " @" + fmt(e.startTime).padStart(6) + "  " + name;
 					});
-					// 累计耗时:请求是并发的,这个数一定大于墙钟时间。它的用处是分辨
-					// "少数几个特别慢"还是"几百个各慢一点" —— 前者头部占比高,后者摊得很平。
+					// 累计(求和)只用来分辨"少数几个特别慢"还是"几百个各慢一点":
+					// 前者头部占比高,后者摊得很平。它必然大于墙钟,不是耗时。
 					var total = boot.reduce(function (s, e) {
 						return s + e.duration;
 					}, 0);
-					box.textContent = head + "\n累计请求耗时 " + fmt(total) + "(并发,非墙钟)\n" + lines.join("\n");
+					return head + "\n—— 最慢15条(耗时/其中SW/发起时刻)——\n" + lines.join("\n") + "\n累计 " + fmt(total) + "(并发求和,非墙钟)" + (hist.length > 1 ? "\n—— 历史 ——\n" + hist.join("\n") : "");
+				};
+
+				var box = document.createElement("div");
+				box.setAttribute(
+					"style",
+					"position:fixed;left:0;top:0;z-index:2147483646;background:rgba(0,0,0,.86);color:#0f0;" +
+						"font:11px/1.45 monospace;padding:4px 6px;max-width:100vw;max-height:72vh;overflow:auto;white-space:pre;"
+				);
+				box.textContent = head + "\n[点此展开明细]";
+				var open = false;
+				box.addEventListener("click", function () {
+					open = !open;
+					box.textContent = open ? full() + "\n[点此收起] [长按可选中复制]" : head + "\n[点此展开明细]";
+					// 展开时顺手选中全文,方便直接复制发出来(比截图可靠,数字不会看错)
+					if (open) {
+						try {
+							var r = document.createRange();
+							r.selectNodeContents(box);
+							var s = getSelection();
+							s.removeAllRanges();
+							s.addRange(r);
+						} catch (e) {}
+					}
 				});
-				document.body ? document.body.appendChild(box) : document.documentElement.appendChild(box);
+				(document.body || document.documentElement).appendChild(box);
 			}
 			// 等 init/index.ts 打上 __bootDoneAt(清看门狗那一刻)再统计;30 秒兜底,
-			// 免得启动真的挂住时连面板都看不到。
+			// 免得启动真的挂住时连面板都看不到(那种情况下 hung 标记会如实标出来)。
 			var waited = 0;
 			var timer = setInterval(function () {
 				waited += 250;
 				if (window.__bootDoneAt || waited >= 30000) {
 					clearInterval(timer);
-					setTimeout(show, 400); // 留一点余量让最后几个请求进 observer
+					// 留一点余量让最后几个请求进 observer,再去 SW 取它自报的分段耗时。
+					// 【取不到也要照样出面板】/__swdiag 只有换到这一版 SW 之后才存在;拿不到就以 null
+					// 出面板(判定那一行会明说取不到),绝不因为诊断失败而挡住启动。
+					setTimeout(function () {
+						fetch("/__swdiag", { cache: "no-store" })
+							.then(function (r) {
+								return r && r.ok ? r.json() : null;
+							})
+							.catch(function () {
+								return null;
+							})
+							.then(show);
+					}, 400);
 				}
 			}, 250);
 		})();

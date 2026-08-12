@@ -35,6 +35,17 @@ const BUILD = "__BUILD_STAMP__";
 const CODE_CACHE = "noname-code-v1";
 const ASSET_CACHE = "noname-pwa-v2";
 
+// ===== 冷启动诊断埋点(临时,查完 15 秒问题连同 /__swdiag 分支一起删)=====
+// 【为什么必须在 SW 里自己计时】页面侧的 PerformanceResourceTiming 在 iOS/WebKit 上
+// 不填 workerStart、transferSize、decodedBodySize(实测面板报「过SW 0 / SW累计 0ms /
+// 0.00MB」而请求数 645,自相矛盾)—— 拿它拆导航阶段等于拿全 0 的字段做除法。
+// 而 SW 里 Date.now() 是可靠的,且**与页面共享同一墙钟**:页面知道
+// timeOrigin + navigation.fetchStart = 浏览器发起导航请求的绝对时刻,
+// SW 知道 fetch 事件到达自己手里的绝对时刻,两者相减就是"浏览器唤醒 SW 并把事件
+// 派发进来"的纯开销 —— 这一个数就能定死"是不是 iOS 系统层的硬伤"。
+// SWDIAG.t0 = 这个 SW 实例开始执行顶层代码的时刻(= 冷唤醒起点)。
+const SWDIAG = { t0: Date.now(), nav: null, evalMs: 0 };
+
 // 【记忆化 caches.open:一次 SW 生命周期只开一次,不是每个请求开一次】
 // 原来三处分支(导航 / 清单 / 主分支)各自 `await caches.open(CACHE)`,等于每个 fetch 事件
 // 都开一遍。open 本身不是零成本(见上),700 次 × 大桶 = 纯浪费。
@@ -488,22 +499,47 @@ self.addEventListener("fetch", event => {
 	// 所以导航也走 Cache-First(SWR):有缓存秒返回,后台静默更新;
 	// 额外加多 key 匹配兜底,防 / vs /index.html 等 URL 差异导致 miss。
 	if (req.mode === "navigate") {
+		// 【诊断】事件到达 SW 的时刻。减去页面侧的 fetchStart 就是"唤醒+派发"开销;
+		// 减去 SWDIAG.t0 则说明这个实例是不是刚被冷启动起来的(≈0 = 刚起,大 = 早就活着)。
+		const dEvent = Date.now();
 		event.respondWith(
 			(async () => {
 				// index.html 属代码,放代码桶。但**必须兜底查一次旧的素材桶**:老用户升到这一版时,
 				// 唯一那份首页还躺在旧桶里,新代码桶要等 install 装完才有 —— 中间那一瞬若读不到首页,
 				// 离线打开就直接 504 白屏。旧桶只在新桶没命中时才查,装齐后这一路永远不走。
+				// 【诊断】第一次碰 Cache Storage 的开销单独计时 —— 这是当前最大的嫌疑:
+				// WebKit 在 SW 冷启动后首次 open 时要把该源的缓存索引载入,而索引规模正比于
+				// 总条目数(15000 vs 700)。这能同时解释"只慢在导航阶段"和"缓存下得越全越慢"。
 				const cache = await openCode();
+				const dOpen = Date.now();
 				// 多 key 尝试:缓存里 URL 可能是 /、/index.html、./index.html 中的任一种
-				const cached =
-					(await cache.match(req)) ||
-					(await cache.match("/")) ||
-					(await cache.match("/index.html")) ||
-					(await cache.match("./index.html")) ||
-					(await (async () => {
-						const old = await openAsset();
-						return (await old.match(req)) || (await old.match("/")) || (await old.match("/index.html")) || (await old.match("./index.html"));
-					})());
+				// 【诊断】逐个 match 分开计时,才能看出是"第一下贵"(索引载入)还是"每下都贵"。
+				let hit = await cache.match(req);
+				const dM1 = Date.now();
+				if (!hit) hit = await cache.match("/");
+				const dM2 = Date.now();
+				if (!hit) hit = await cache.match("/index.html");
+				if (!hit) hit = await cache.match("./index.html");
+				const dM4 = Date.now();
+				let dAsset = dM4;
+				if (!hit) {
+					const old = await openAsset();
+					hit = (await old.match(req)) || (await old.match("/")) || (await old.match("/index.html")) || (await old.match("./index.html"));
+					dAsset = Date.now();
+				}
+				const cached = hit;
+				// 【诊断】把这次导航的各段耗时存起来,等页面来 /__swdiag 取。
+				// 只存最近一次:页面一启动就会来取,不需要历史。
+				SWDIAG.nav = {
+					swAgeMs: dEvent - SWDIAG.t0, // 事件到达时,这个 SW 实例已活了多久(≈0 = 冷启动)
+					evtAbs: dEvent, // 事件到达的绝对时刻(页面拿它减 fetchStart = 唤醒+派发开销)
+					openMs: dOpen - dEvent, // 首次 caches.open() —— 索引载入嫌疑
+					m1Ms: dM1 - dOpen, // 第一次 match(req)
+					m2Ms: dM2 - dM1, // 第二次 match("/")
+					m34Ms: dM4 - dM2, // 第三四次 match
+					assetMs: dAsset - dM4, // 兜底查大素材桶(满缓存下应为 0 = 没走)
+					hit: !!cached,
+				};
 
 				// 后台静默网络更新(fetchSafe 带超时,Safari 断网不会永久挂)
 				// 【必须把上面每个读取 key 都写一遍 —— 只写 req 等于永远读不到新首页】
@@ -535,7 +571,11 @@ self.addEventListener("fetch", event => {
 					// 重开一看戳还是老的(实测好几次都这样);index.html 里那套自修复同样永远到不了用户手里。
 					// waitUntil 让 SW 至少活到这次写入完成,代价仅是一次几十 KB 的后台请求(带超时,不会挂死)。
 					event.waitUntil(bgUpdate);
-					return await sanitizeResponse(cached);
+					const out = await sanitizeResponse(cached);
+					// 【诊断】SW 把响应交还浏览器的时刻。retMs 覆盖 sanitizeResponse ——
+					// 它在 redirected 时会 await resp.blob() 把整个首页读成 blob 再重建,不是零成本。
+					SWDIAG.nav.retMs = Date.now() - dEvent;
+					return out;
 				}
 
 				// 没缓存:只能等网络(首次访问必须联网)
@@ -565,6 +605,18 @@ self.addEventListener("fetch", event => {
 	// 放行到网络、连 SW 的超时兜底都吃不到(browser.js:37 那 2 秒超时就是为此而加)。
 	if (ALWAYS_404.includes(url.pathname)) {
 		event.respondWith(new Response("", { status: 404, statusText: "Not Found" }));
+		return;
+	}
+
+	// 【诊断】页面读取上面那些打点用的内部接口(临时,查完连同 SWDIAG 一起删)。
+	// 放在最前面:它不是真实资源,绝不能进缓存分支,也不该被 ALWAYS_404 之类拦掉。
+	if (url.pathname === "/__swdiag") {
+		event.respondWith(
+			new Response(JSON.stringify({ now: Date.now(), swBornAt: SWDIAG.t0, nav: SWDIAG.nav }), {
+				status: 200,
+				headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+			})
+		);
 		return;
 	}
 
