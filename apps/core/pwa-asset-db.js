@@ -78,17 +78,60 @@ function req(r) {
 
 /**
  * 读一条素材,拼成 Response 直接给浏览器。
+ * @param {string} pathname
+ * @param {Request} [request] 原始请求——用于处理 Range 请求头(音频/视频必须)
  * @returns {Promise<Response|null>} null = 库里没有(调用方回退 Cache Storage / 网络)
  */
-async function readAsset(pathname) {
+async function readAsset(pathname, request) {
 	try {
 		const db = await openAssetDB();
 		const rec = await req(db.transaction(STORE, "readonly").objectStore(STORE).get(pathname));
 		if (!rec || !rec.buf) return null;
 		// 【Content-Type 必须自己填】存的是裸 ArrayBuffer,不带类型。填错了图不显示、音频不播,
 		// 而且 .js/.css 若类型不对会被浏览器拒绝执行 —— 所以 mime 是写入时一起存的,不在这里猜。
-		const headers = { "Content-Type": rec.mime || "application/octet-stream" };
-		return new Response(rec.buf, { status: 200, headers });
+		const mime = rec.mime || "application/octet-stream";
+		const total = rec.buf.byteLength;
+
+		// 【Range 请求处理——Safari/WebKit 对媒体(audio/video)强制要求 206】
+		// Safari 的 <audio>/<video> 发 Range 请求后如果收到 200(而非 206),会直接拒绝播放
+		// (不报错、不触发 onerror,就是静默不播)。Chrome 宽容一些但行为也不稳定。
+		// 见 TROUBLESHOOTING.md「mp3 走 <audio> 必须实现 Range/206」。
+		const rangeHeader = request && request.headers.get("Range");
+		if (rangeHeader) {
+			// 解析 Range: bytes=START-END (END 可选)
+			const m = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
+			if (m) {
+				const start = parseInt(m[1], 10);
+				const end = m[2] ? parseInt(m[2], 10) : total - 1;
+				// 越界检查
+				if (start >= total) {
+					return new Response("", { status: 416, headers: { "Content-Range": `bytes */${total}` } });
+				}
+				const clampedEnd = Math.min(end, total - 1);
+				const slice = rec.buf.slice(start, clampedEnd + 1);
+				return new Response(slice, {
+					status: 206,
+					statusText: "Partial Content",
+					headers: {
+						"Content-Type": mime,
+						"Content-Length": String(slice.byteLength),
+						"Content-Range": `bytes ${start}-${clampedEnd}/${total}`,
+						"Accept-Ranges": "bytes",
+					},
+				});
+			}
+		}
+
+		// 非 Range 请求(或 Range 格式无法解析):返回完整内容,带上 Content-Length 和
+		// Accept-Ranges 让浏览器知道后续可以发 Range。
+		return new Response(rec.buf, {
+			status: 200,
+			headers: {
+				"Content-Type": mime,
+				"Content-Length": String(total),
+				"Accept-Ranges": "bytes",
+			},
+		});
 	} catch {
 		return null; // 库坏了/开不了 → 当作没有,让调用方走原路,绝不因此白屏
 	}

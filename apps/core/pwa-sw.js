@@ -665,7 +665,7 @@ self.addEventListener("fetch", event => {
 			// 【下载器豁免】它带 cache:"no-cache",本意就是"给我网络上的真东西"用来填库,
 			// 若在这里命中库就永远填不进新内容。
 			if (assetDBReady && req.cache !== "no-cache" && !isCodeAsset(url.pathname)) {
-				const fromDB = await readAsset(url.pathname);
+				const fromDB = await readAsset(url.pathname, req);
 				if (fromDB) {
 					// 【换版那一次后台问一句"变了没",变了就更新素材库】
 					// 这是"改过的立绘能自动换新"的唯一来源。注意**我们并不比对内容** ——

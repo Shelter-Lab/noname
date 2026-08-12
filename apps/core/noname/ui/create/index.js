@@ -2431,15 +2431,36 @@ export class Create {
 		ui.backgroundMusic.autoplay = true;
 		ui.backgroundMusic.addEventListener("ended", game.playBackgroundMusic);
 		ui.window.appendChild(ui.backgroundMusic);
-		ui.window.addEventListener(
-			lib.config.touchscreen ? "touchend" : "click",
-			() => {
-				if (!ui.backgroundMusic.played.length && lib.config.background_music != "music_off" && !isNaN(ui.backgroundMusic.duration)) {
-					ui.backgroundMusic.play();
+		// 【BGM 自动播放恢复】浏览器阻止无交互自动播放后,在用户首次点击时尝试恢复。
+		// 不能只用 { once: true }:如果点击时 BGM 文件还没加载完(duration 为 NaN),
+		// 那一次机会就浪费了,BGM 永远不会播。改成:首次点击后,若文件还没加载好,
+		// 再监听 canplay 事件做一次恢复。
+		{
+			let bgmResumed = false;
+			const tryResumeBGM = () => {
+				if (bgmResumed) return;
+				if (lib.config.background_music == "music_off") return;
+				if (!ui.backgroundMusic.played.length && ui.backgroundMusic.src) {
+					if (!isNaN(ui.backgroundMusic.duration)) {
+						bgmResumed = true;
+						ui.backgroundMusic.play().catch(() => {});
+					} else {
+						// 文件还没加载完,等 canplay 再试一次
+						ui.backgroundMusic.addEventListener("canplay", () => {
+							if (!bgmResumed && !ui.backgroundMusic.played.length) {
+								bgmResumed = true;
+								ui.backgroundMusic.play().catch(() => {});
+							}
+						}, { once: true });
+					}
 				}
-			},
-			{ once: true }
-		);
+			};
+			ui.window.addEventListener(
+				lib.config.touchscreen ? "touchend" : "click",
+				tryResumeBGM,
+				{ once: true }
+			);
+		}
 		if (lib.config.cursor_style == "pointer") {
 			ui.window.classList.add("nopointer");
 		}
