@@ -185,17 +185,21 @@
 
 ---
 
-## 五、冷启动变慢(2026-08-11)—— 一个症状,六个独立病因
+## 五、冷启动变慢(2026-08-11)—— 一个症状,七个独立病因
 
 **症状是一个**:冷启动(关掉 standalone PWA 再开)从 7~8 秒变 15 秒,**在线和离线一样慢**。
-**病因查出来是六个,机制互不相同**(病因五、六是修前四个时自己引入/暴露的,见各节)。这一点非常反直觉,查的时候差点用一个解释套住两边 ——
+**病因查出来是七个,机制互不相同**(病因五、六是修前四个时自己引入/暴露的,见各节)。这一点非常反直觉,查的时候差点用一个解释套住两边 ——
 「在线要重下 35MB」解释得了在线,但**离线一个字节都不下载,那条解释在离线场景下根本不成立**。
 先记住这个分流判据:
 
 > **在线慢 = 吞吐问题(下了多少字节)。离线慢 = 延迟问题(等了多少个超时)。**
 > 如果在线和离线耗时**差不多**,瓶颈就一定不在吞吐 —— 因为离线不下载,却没有变快。
 
-四个病因速览(详见各小节):
+> **⚠️ 2026-08-12 补:病因七才是那 15 秒的真凶,前六个都是陪跑。**
+> 上面这条分流判据**不足以定位它** —— 它两边都慢,却既不是吞吐也不是超时,而是**存储引擎的
+> 固定延迟**。修完前六个,冷启动仍是 15.8 秒。**如果你在读这一节,先跳到病因七。**
+
+七个病因速览(详见各小节):
 
 | | 影响面 | 机制 | 修法 |
 |---|---|---|---|
@@ -205,6 +209,7 @@
 | 病因四 | 桌面/安卓离线 | 沙盒 iframe 加载 `sandbox.js`,iframe 不走 SW → 永久 pending → 60s 都出不了首屏 | `sandboxEnabled = false` 无条件跳过 |
 | 病因五 | 离线 | 断掉代码文件逐文件 SWR 后,`failStreak` 唯一的喂食来源也断了 → `looksOffline()` 恒假 → 快失败短路永不生效 | **未修**,改法待定(见下) |
 | 病因六 | 两边 | install 换版只写 `./index.html` 不写 `/`,导航读的是 `/` → 首页永远靠 SWR 慢一拍 | install 对首页额外 `put("/")` |
+| **病因七 ★真凶** | **两边(仅 iOS/WebKit)** | **Cache Storage 条目一多,SW 冷启动首次 `caches.open()` 要摸遍该 origin 下每个桶的每一条 record 文件。21307 条 × ≈0.74ms = 15.8 秒,全花在拿到 index.html 之前** | **未修**。唯一杠杆是**降条目数**(拆桶、压体积都无效,已证伪) |
 
 **⚠️ 病因二的修法引入过一个回归,病因三顺带修掉了** —— 详见病因二末尾。这是本节最值得记住的一课:
 **删一个"纯浪费"的请求前,先查有没有别的机制在靠它的副作用工作。**
@@ -416,6 +421,134 @@
 
 **★ 教训:同一份内容有多个缓存 key 时,写入方必须全写、读取方的匹配顺序必须查清。**
 `repair()` 和 install 是两个独立的写入方,只有一个记得写 `"/"`。
+
+### 病因七(★真凶,2026-08-12):Cache Storage 的条目数,是 iOS 冷启动的一次项
+
+**修完前六个病因,冷启动仍是 15.8 秒。这一节是那 15 秒的真正归宿。**
+
+#### 实测数据(iOS standalone,满缓存 21307 条 / 1805MB)
+
+在 SW 里逐段打点得到(注意:**页面侧 PerformanceResourceTiming 测不出来**,见下面「测量陷阱」):
+
+| 段 | 耗时 | 说明 |
+|---|---|---|
+| 唤醒+派发 SW | **6ms** | 系统起 SW 线程 → fetch 事件到达。**iOS 硬伤假设由此否掉** |
+| `caches.keys()` | **15.8s** | ★ 全部时间在这里。而它只是**列桶名**,不开桶、不读内容 |
+| `indexedDB.open()`(空库) | **4ms** | 对照组:同一台机器,别的存储引擎不慢 |
+| `navigator.storage.estimate()` | **1ms** | 配额核算路径**不参与**(曾被怀疑是元凶,由此排除) |
+| `cache.match()` | **2ms** | 桶开好之后极快(内存 `m_records` 命中) |
+| 之后 645 个请求 | **682ms** | 拿到 index.html 之后的整个模块加载,很快 |
+
+**总 16.4s = 首页 15.7s + 之后 0.7s。93% 的时间花在 SW 交出 index.html 之前。**
+
+对照:桌面 Edge/Chromium,**同样约 2 万条、SW 活着、满缓存冷启动**,同一行只要几十毫秒。
+
+#### 机制(WebKit 源码,多方独立逐行核对)
+
+```
+caches.open(任意桶)
+  → DOMCacheStorage::open() 先调 retrieveCaches()        ← 不是直接开那个桶
+  → IPC CacheStorageAllCaches
+  → CacheStorageManager::allCaches():
+        for (Ref cache : borrow(m_caches).get()) cache->open(...);   ← 对 origin 下每个桶
+  → CacheStorageCache::open() → readAllRecordInfos()
+  → CacheStorageDiskStore::readAllRecordInfosInternal():
+        双层 listDirectory,对每条 record 文件 SafeFileData::read() + 解码 header
+```
+
+**四条结论,每条都能独立解释一个实测现象:**
+
+1. **账按 origin 算,不按桶** —— `for (每个桶)` 那一行。**这就是拆桶必然无效的原因**,而且是代码
+   **事前预测**出来的,不是事后附会。
+2. **磁盘上没有 record 级索引** —— 持久化辅助文件只有 `cacheslist`(仅存桶名)/`estimatedsize`/
+   `origin`/`salt`。条目索引 `m_records` 只能靠全量扫描在内存里现建,`m_isInitialized` 是**纯内存**
+   → 解释了"之后 match 只要 2ms",也解释了为什么每次冷启动都要重付。**这不是可调参数,是架构差异。**
+3. **贵的是条目数,不是字节** —— 扫描里显式 `if (recordName.endsWith(blobSuffix)) continue;`,
+   大 body 存成独立 `-blob` 文件、扫描时跳过。**所以压缩素材体积对这个瓶颈完全无效。**
+   (注意 `WTF::pageSize()` 在 iOS arm64 是 16KB,≤16KB 的 body 是 inline 存在 record 文件里的。)
+4. **iOS 比桌面慢的机制性原因** —— `SafeFileData::read()` 每个文件先调
+   `isSafeToUseMemoryMapForPath`,其 iOS 实现(`FileSystemCocoa.mm`,`#if PLATFORM(IOS_FAMILY)`)
+   是 `[NSFileManager attributesOfItemAtPath:]` 元数据查询,必要时还 `setAttributes:` 写文件保护类;
+   **非 iOS 平台该函数是空实现 `return true`**。即 iOS 每条 record 多付一次 NSFileManager 往返。
+
+成本构成:15.8s / 21307 ≈ **0.74ms/条**,正是冷态闪存随机读 + per-file syscall 的区间。
+
+**Chromium 为什么不受影响**:它有持久化条目索引(`index.txt` + protobuf + SimpleCache pickle,
+每条目元数据 8 字节),打开 cache 时**不碰条目文件**。
+
+#### ⚠️ 已证伪,别再走这几条路
+
+| 假设 | 为什么错 |
+|---|---|
+| 拆成代码桶/素材桶能缓解 | `allCaches()` 对每个桶都全量扫。**实测拆了没用,源码也预测了没用** |
+| 压缩素材体积 / 减小文件 | 扫描跳过 `-blob` 实体,与字节数无关。`estimate()` 只花 1ms 也佐证 |
+| 「15000 次 SHA-1 ≈ 15 秒」 | **算错约 400 倍**。SHA1 走 CommonCrypto(ARM64 硬件加速),只校验 header,量级 ≈46ms(0.3%) |
+| 「1GB 实体被 mmap + hash 了一遍」 | 没有,`-blob` 文件被显式跳过 |
+| 是 iOS 系统层唤醒 SW 慢 | 唤醒+派发实测 **6ms** |
+| 是配额核算(`getUsageFunction`)在扫 | `estimate()` 实测 **1ms** |
+| 等新版 Safari 修 | **WebKit Bugzilla 上没有任何跟踪这个开销的 bug**(多路检索确认)。这是当前设计的既定行为,不是待修缺陷 |
+| 桌面 Edge 快 ⇒ 我们代码没问题 | Chromium 有持久化索引、WebKit 没有,是**架构差异**。**桌面对照组对 WebKit 结论零信息量** |
+
+#### ★ 教训:「条目数」是一个没人告诉你要预算的维度
+
+- **官方文档全是字节维度**(MDN Cache、web.dev Storage、Chromium README、WebKit 存储策略),
+  **没有任何条目数上限或推荐量级**。这不是"违反了 best practice",而是**掉进了文档盲区**。
+- **社区也没有那条 practice**。五路独立检索都没找到 web.dev / MDN / Chrome 团队 / Jake Archibald /
+  Workbox 说过"大批量二进制该放 IndexedDB"。**Chrome 存储团队的建议恰好相反**
+  (`developer.chrome.com/docs/ai/cache-models`:"recommends the Cache API"、"IndexedDB ... the worst
+  place")。**但那篇文全文零 benchmark、原文自陈 "not generalizable"、样例条目数=1、全文不提
+  iOS/Safari** —— 它测的是"单个巨大 blob 的吞吐",我们的问题是"1.5 万条目下的固定延迟",
+  **两个正交的轴**。曾经拿它当"别迁"的依据,是跨引擎的范围转移。
+- **唯一真正可比的先例是 Kiwix JS PWA**(离线维基百科,单档 110GB+):Cache Storage **只放代码**,
+  内容是"单个大文件 + 内部索引 + 随机读",走 OPFS。Unity WebGL 同理(打包好的 `.data` 存 IndexedDB)。
+  **共同点不是"用哪个 API",而是"素材不以一个文件一条记录的形式存在"。**
+- **本项目的选型错误**:全程按字节预算做设计(1GB 够不够、会不会被驱逐),而 iOS 上真正线性
+  收费的维度是条目数;且用**桌面 Chromium 实测**给 iOS 开了绿灯。
+
+#### ⚠️ 测量陷阱(这轮踩了三个,都产出过假数据)
+
+1. **`performance.now()` 的原点是导航开始,不是脚本执行时刻。** SW 花 14 秒才吐出 index.html 时,
+   内联脚本一执行 `now()` 就已经是 14000 —— 拿它当 t0,`bootDone - t0` 只剩 470ms,
+   **把最慢那段整个减掉了**。实测就报出过「面板 470ms / 人等 15 秒」。**起点必须固定为 0。**
+2. **iOS/WebKit 不填 `workerStart` / `transferSize` / `decodedBodySize`。** 拿它们做分类会得到
+   「请求 645(过SW 0)| 0.00MB」这种自相矛盾的数(缓存命中**必然**过 SW,因为 Cache Storage
+   只有 SW 和页面 JS 能读)。**缺字段要如实显示"字段缺失",绝不显示 0** —— 那种"看起来像数据的 0"
+   会把人带向完全错误的方向。**结论:导航阶段的拆分只能靠 SW 自己 `Date.now()` 打点**
+   (SW 与页面共享墙钟,`SW 收到事件的绝对时刻 − (timeOrigin + nav.fetchStart)` = 唤醒+派发开销)。
+3. **★ 埋点自己会烧掉被测的时间。** 为了"顺手报个条目数"在导航分支里加了
+   `(await cache.keys()).length` 两句,而 `caches.keys()` 正是那个 15.8 秒的操作 ——
+   **冷启动从 16.4s 变成 54.3s**。而当时给这两句写的注释还是"排在计时之后,不污染任何一项":
+   只想到别污染数字,没想到会污染**用户的启动**。
+   **在已知昂贵的路径上加诊断,先算清诊断本身的成本。**
+
+#### 修法方向(未实施,2026-08-12 决定)
+
+**唯一杠杆是降条目数。** 三条路的取舍:
+
+| | 冷启动 | 每次读一张图 | 增量更新 | 改动量 |
+|---|---|---|---|---|
+| **IndexedDB,一素材一条,存 ArrayBuffer** | O(1)(开一个 SQLite + 读 schema,不枚举记录) | B-tree 精确命中,2~3 页 | **保留** | 1:1 映射,最小 |
+| 打包成少量大文件 + 留在 Cache Storage | ~0.8s | **白读几 MB**(`Response` 没有随机访问,只能流式跳到偏移) | 改一张重下整个包 | 要设计包格式+索引+流式读 |
+| OPFS + 打包 | 读路径不枚举 | `File.slice()` 真随机读 | 改一张重下整个包 | 最大;`createWritable` 要 Safari 26,SW 里只能异步读、拿不到同步句柄 |
+
+**选 IndexedDB**,因为"打包"的前提是**存储支持随机读**,而 Cache Storage 不支持 ——
+在这里打包是硬凑。(Kiwix/Lumafield 用 pack 是配 OPFS 用的,不是配 Cache Storage。)
+而若一素材一条就能解决,压根不需要打包这一层复杂度。
+
+**红线:绝不存 Blob,只存 ArrayBuffer + 单独存 MIME。** 两个理由:
+1. WebKit 下 IDB 里的 Blob 会**每个落成一个独立 `.blob` 文件** —— 把"万文件"问题原样搬过去,白干。
+2. iOS 存 Blob 有至今未修的损坏/写失败 bug:WebKit **235687**、**240216**(均 NEW)、
+   **188438**(2018 标 FIXED,但 iOS 18.7 / 26.5.2 仍有新报告)。
+
+**已知风险,实施时必须处理:**
+- **WebKit 287876(NEW):iOS 18 PWA 下 `put` 会间歇性失败。** 写 2 万条必须做**重试 + 断点续传**,
+  不能假设 put 一定成功。**这个不需要预先实测 —— 直接把自愈做进去。**
+- 存 ArrayBuffer 后 **`Content-Type` 必须自己填**(按扩展名映射)。
+- **mp3 走 `<audio>` 必须实现 Range/206** —— Safari 对媒体要求 Range,返回 200 会被拒。
+- **迁移必须真正删掉旧的 Cache Storage 素材**,留着 = 15 秒照旧(账按 origin 算)。
+- **迁移不必让用户重下** —— 理论上可本地从 Cache Storage 读出再写入 IDB,只付一次那 15.8 秒。未验证。
+- 仍未有人公开实测 iOS 上 1GB / 1.4 万条 IDB 冷开(全球范围的数据空白)。机制上 `open` 不枚举
+  记录、`idbStorageSize` 只 stat `*.sqlite3`,故**预期**为 O(1),但这是源码推断而非实测。
 
 ### ★ 决策记录:为什么至今没给产物加 content hash
 
