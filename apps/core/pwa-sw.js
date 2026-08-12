@@ -14,7 +14,7 @@
 // → 「检查更新」永远弹"已是最新版本",用户没有任何主动更新手段。
 const BUILD = "__BUILD_STAMP__";
 
-// —— 两个桶:代码一个小桶,素材一个大桶 ——
+// —— 存储分工:代码在 Cache Storage,素材在 IndexedDB ——
 //
 // 【重要:拆桶治不了冷启动慢,这一点已被实测和 WebKit 源码双双证伪 —— 别再往这个方向使劲】
 // 这里原先写着「桶里 730 条和 14993 条的开销差 20 倍」并自称实测。**那个数字是编的**,
@@ -31,17 +31,16 @@ const BUILD = "__BUILD_STAMP__";
 // 扫描时 `if (recordName.endsWith(blobSuffix)) continue;` 跳过大 body 实体,故**与总字节无关**
 // —— 压缩素材体积没用,唯一的杠杆是**降条目数**。
 //
-// 【那这两个桶为什么还留着】拆桶本身无害(代码桶小、语义也更清楚),而合回去要动读写两端、
-// 且会让用户重下代码 —— 收益为零、风险不为零,故保留现状。真正的解法是让素材不再以
-// 「一个文件一条记录」的形式进 Cache Storage(打包成少量大文件),那是另一件事。
-// 参见 TROUBLESHOOTING 的冷启动章节。
+// 【结论:素材已迁出 Cache Storage】素材改存 IndexedDB(pwa-asset-db.js),
+// 旧素材桶在 activate 里整桶删掉 —— 留着就等于没治,因为 openCode() 那一下会连带扫它。
+// 代码留在 Cache Storage:只有 746 条、不构成成本,且它需要「整版原子一致」那套机制
+// (BUILD_KEY/STALE_KEY),搬走要重做一遍。参见 TROUBLESHOOTING 病因七。
 //
-// 【素材桶为什么沿用旧名】换名等于用户下过的 1GB 立绘/语音全部作废重下。代码桶是新名,
-// 用户只重下约 27MB 代码,素材一个字节都不碰。
-// 【旧桶里那份代码副本不清】它现在是约 27MB 死重,但启动路径已经不查它了,而 633 次
-// cache.delete 打在 14993 条的大桶上本身就是一次昂贵操作 —— 省下来的收益抵不上风险。
 const CODE_CACHE = "noname-code-v1";
-const ASSET_CACHE = "noname-pwa-v2";
+// 【素材桶已彻底退役,不要再加回来】素材改存 IndexedDB(见 pwa-asset-db.js),
+// activate 里会把 noname-pwa-v2 整桶删掉。这里不再定义它、也不再提供 openAsset ——
+// 因为 caches.open() 对不存在的桶是**创建**语义,任何一次调用都会把刚删掉的桶重新建出来;
+// 而只要它里面又有了内容,上面说的那 15.8 秒就悄悄回来了。
 
 // —— 素材仓库(IndexedDB):治病因七的那一刀 ——
 // 【为什么用 importScripts 而不是 import】register("./pwa-sw.js") 没带 { type: "module" },
@@ -63,9 +62,7 @@ try {
 // 原来三处分支(导航 / 清单 / 主分支)各自 `await caches.open(CACHE)`,等于每个 fetch 事件
 // 都开一遍。open 本身不是零成本(见上),700 次 × 大桶 = 纯浪费。
 let codeCachePromise = null;
-let assetCachePromise = null;
 const openCode = () => (codeCachePromise ||= caches.open(CODE_CACHE));
-const openAsset = () => (assetCachePromise ||= caches.open(ASSET_CACHE));
 
 // 缓存里记录"这批代码是哪个构建的"用的 key(不是真实资源,只存一个戳)
 const BUILD_KEY = "/__pwa_build__";
@@ -270,7 +267,6 @@ self.addEventListener("install", event => {
 				// 卡牌框/基础字体)。按 isCodeAsset 分流写进对应的桶 —— 判据必须和 fetch 读取端
 				// 完全一致,否则写进 A 桶、从 B 桶找,等于没缓存。
 				const codeCache = await openCode();
-				const assetCache = await openAsset();
 				// install 装的就是核心清单本身 → 整份都归 boot 桶,不必再逐个判。
 				// 【为什么不能用 isBootAsset】它要读缓存里的清单,而这会儿清单正在被装;
 				// 更重要的是语义上根本不需要:list 就是核心清单,定义上全是 boot 资源。
@@ -390,7 +386,7 @@ self.addEventListener("install", event => {
 						// 一定读到 null → 走下面的 else 把两个 key 全删 → 全部代码文件永久
 						// Network-First(就是注释里那个首屏 1381ms→4231ms 的退化),而且**不自愈**。
 						// 兜底再查素材桶:老版本 SW 可能把它写在那儿。
-						const r = (await cache.match("./pwa-core-assets.json")) || (await cache.match("/pwa-core-assets.json")) || (await (await openAsset()).match("./pwa-core-assets.json"));
+						const r = (await cache.match("./pwa-core-assets.json")) || (await cache.match("/pwa-core-assets.json"));
 						if (r) all = await r.json();
 					} catch {
 						/* 清单读不到就留空 */
@@ -425,10 +421,24 @@ self.addEventListener("message", event => {
 self.addEventListener("activate", event => {
 	event.waitUntil(
 		(async () => {
-			// 清理旧版本缓存。【两个桶都必须放行】漏掉 ASSET_CACHE 会把用户下过的 1GB
-			// 立绘/语音直接删掉;漏掉 CODE_CACHE 则每次 activate 把刚装好的代码删光 → 白屏。
+			// 清理旧缓存桶。【只留 CODE_CACHE】漏掉它会把刚装好的代码删光 → 白屏。
+			//
+			// 【素材桶 noname-pwa-v2 现在必须删掉,这不是可选项】素材已改存 IndexedDB
+			// (见 pwa-asset-db.js),旧桶里那两万条没有任何代码会去读了 —— 但**留着就等于
+			// 这次改动白做**:那 15.8 秒的触发条件是 caches.open() 扫该 origin 下**所有桶的
+			// 所有 record**(源码 CacheStorageManager::allCaches 里 `for (每个桶) cache->open()`),
+			// 而 SW 每次冷启动仍要 openCode() 读代码,那一下会连带把素材桶也扫一遍。
+			// 换句话说:不删旧桶,冷启动照样 15.8 秒。
+			//
+			// 【为什么敢整桶删而不等迁移完成】① 整桶 caches.delete() 比两万次逐条 delete
+			// 快得多,而逐条 delete 打在两万条的桶上本身就是一次昂贵操作;② 启动路径不受影响 ——
+			// 48669e4 之后那 103 个启动期素材(11 张 splash、theme/style 下 62 张背景、
+			// ol_bg、卡背手牌框、2 个基础字体)已经**同时**在核心清单里、由 install 装进代码桶,
+			// 删素材桶动不到它们;③ 其余立绘/语音本来就要重新下载一次(素材换了存储),
+			// 删与不删都得重下,那就不必留着白付那 15.8 秒。
+			// 代价:删掉到重新下载之间,未下载的立绘/语音显示为剪影(在线时照常联网取)。
 			const keys = await caches.keys();
-			await Promise.all(keys.filter(k => k !== CODE_CACHE && k !== ASSET_CACHE).map(k => caches.delete(k)));
+			await Promise.all(keys.filter(k => k !== CODE_CACHE).map(k => caches.delete(k)));
 			await self.clients.claim();
 		})()
 	);
@@ -523,11 +533,7 @@ self.addEventListener("fetch", event => {
 					(await cache.match(req)) ||
 					(await cache.match("/")) ||
 					(await cache.match("/index.html")) ||
-					(await cache.match("./index.html")) ||
-					(await (async () => {
-						const old = await openAsset();
-						return (await old.match(req)) || (await old.match("/")) || (await old.match("/index.html")) || (await old.match("./index.html"));
-					})());
+					(await cache.match("./index.html"));
 
 				// 后台静默网络更新(fetchSafe 带超时,Safari 断网不会永久挂)
 				// 【必须把上面每个读取 key 都写一遍 —— 只写 req 等于永远读不到新首页】
@@ -621,7 +627,7 @@ self.addEventListener("fetch", event => {
 					}
 					return await sanitizeResponse(resp);
 				} catch {
-					const cached = (await cache.match(req)) || (await (await openAsset()).match(req));
+					const cached = await cache.match(req);
 					if (cached) return cached;
 					// 【带 no-cache 的请求绝不能收到下面那个假空清单】它明说了"我要网络上的真相",
 					// 而 repair() 给 URL 挂了一次性 bust 串 —— 缓存里必然未命中,于是只要网络抖一下
@@ -656,7 +662,7 @@ self.addEventListener("fetch", event => {
 			// 【素材优先查 IndexedDB —— 这是不碰 Cache Storage 的快路径】
 			// 只有非代码文件走这里:代码仍住 Cache Storage(746 条,不构成病因七的成本),
 			// 且它有整版原子一致的要求(BUILD_KEY/STALE_KEY 那套),搬走反而要重做一遍。
-			// 【为什么放在 openCode/openAsset 之前】病因七的账是"第一次碰 Cache Storage"就付,
+			// 【为什么放在 openCode 之前】病因七的账是"第一次碰 Cache Storage"就付,
 			// 排在后面就等于已经付过了、白查一趟。
 			// 【下载器豁免】它带 cache:"no-cache",本意就是"给我网络上的真东西"用来填库,
 			// 若在这里命中库就永远填不进新内容。
@@ -664,12 +670,10 @@ self.addEventListener("fetch", event => {
 				const fromDB = await readAsset(url.pathname);
 				if (fromDB) return fromDB;
 			}
-			const isBoot = await isBootAsset(url.pathname);
-			const cache = isBoot ? await openCode() : await openAsset();
-			// 【boot 资源要兜底查一次大桶】老用户升到这一版时 boot 桶里还没有这 103 个素材
-			// (要等 install 装完),而它们此前就躺在大桶里。这一瞬若离线,读不到就白屏/缺图。
-			// 装齐后 cache.match 先命中,这一路不再走。
-			const cached = (await cache.match(req)) || (isBoot ? await (await openAsset()).match(req) : null);
+			// 【只剩一个桶了,不再分桶】素材走 IndexedDB(上面那段),能到这里的非代码请求
+			// 只有「素材库里还没有」这一种情况 —— 那就联网取,并由下载器负责填库。
+			const cache = await openCode();
+			const cached = await cache.match(req);
 			// 「要不要整版原子一致」仍由 isCodeAsset 独立回答 —— 只有可执行代码才有跨 chunk
 			// 绑定问题,那 103 个图片/字体进了 boot 桶也不该走 Network-First。
 			const isCode = isCodeAsset(url.pathname);

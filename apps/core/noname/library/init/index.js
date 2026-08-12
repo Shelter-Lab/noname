@@ -177,8 +177,6 @@ export class LibInit {
 				writeFailed.length = 0;
 				writeFailed.push(...failed);
 				if (failed.length) {
-					// 写进库内日志:standalone 下看不到 console,出问题时这是唯一能事后翻的东西
-					await db.logMigration(`写失败 ${failed.length} 个(重试后仍失败): ${failed.slice(0, 20).join(", ")}`);
 					console.warn(`[素材库] 仍有 ${failed.length} 个写不进去`, failed.slice(0, 20));
 				}
 			}

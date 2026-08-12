@@ -188,14 +188,23 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					var stampInCache = rec ? await rec.text() : null;
 					var staleRec = await codeCache.match("/__pwa_stale__");
 					var staleList = staleRec ? await staleRec.json() : [];
-					// 条目数分桶报:只报代码桶那 700 多条会让用户以为下过的 1GB 素材没了。
+					// 【素材数改问 IndexedDB,绝不能再 caches.open("noname-pwa-v2")】
+					// 素材已迁进 IDB,旧素材桶由 SW 的 activate 整桶删掉;而 caches.open() 对
+					// 不存在的桶是**创建**语义 —— 光是在这儿开一下就会把它重新建出来,
+					// 那 15.8 秒的隐患也跟着回来(见 pwa-sw.js 文件头)。
 					var codeKeys = await codeCache.keys();
-					var assetKeys = await (await caches.open("noname-pwa-v2")).keys();
+					var assets = 0;
+					try {
+						var db = await import(/* @vite-ignore */ `${lib.assetURL}pwa-asset-db-esm.js`);
+						assets = await db.countAssets();
+					} catch (e) {
+						/* 素材库读不到就报 0,不影响版本体检本身 */
+					}
 					return {
 						stamp: /^\d{10}$/.test(String(stampInCache || "")) ? stampInCache : null,
 						stale: Array.isArray(staleList) ? staleList.length : 0,
 						code: codeKeys.length,
-						assets: assetKeys.length,
+						assets: assets,
 					};
 				} catch (e) {
 					return null;
@@ -325,7 +334,7 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					}
 					// 一切正常。顺带把体检结果报出来 —— 以后再遇到"缓存好了怎么还慢",
 					// 这一行就能直接说明是不是缓存问题,不用再靠猜。
-					alert("已是最新版本(v" + latest + ")。" + (health ? "\n\n本地缓存:代码 " + health.code + " 个 + 素材 " + health.assets + " 个,代码版本 v" + health.stamp + "(一致,启动直接读缓存)" : ""));
+					alert("已是最新版本(v" + latest + ")。" + (health ? "\n\n本地缓存:代码 " + health.code + " 个(Cache Storage)+ 素材 " + health.assets + " 个(素材库)\n代码版本 v" + health.stamp + "(一致,启动直接读缓存)" : ""));
 				} catch (e) {
 					console.error("检查更新失败:", e);
 					alert("检查更新失败:" + (e && e.message ? e.message : e));

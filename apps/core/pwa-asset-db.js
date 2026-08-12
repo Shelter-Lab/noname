@@ -28,11 +28,6 @@ const DB_NAME = "noname-assets";
 const DB_VERSION = 1;
 // 素材表:key = pathname(如 "/image/character/re_caocao.jpg"),value = { buf, mime, len }
 const STORE = "assets";
-// 迁移/下载进度表:key = 固定字符串,value = 任意 JSON。
-// 【为什么进度要落 IDB 而不是内存或 localStorage】WebKit 287876:iOS 18 PWA 下 put 会
-// **间歇性失败**(至今 NEW)。写 2 万条必然中途出错,必须能断点续传;而 SW 随时被回收,
-// 内存标记留不住,localStorage 在 SW 里压根不可用。放在同一个事务域里最省事。
-const META = "meta";
 
 let dbPromise = null;
 
@@ -48,7 +43,6 @@ function openAssetDB() {
 			rq.onupgradeneeded = () => {
 				const db = rq.result;
 				if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
-				if (!db.objectStoreNames.contains(META)) db.createObjectStore(META);
 			};
 			rq.onsuccess = () => {
 				const db = rq.result;
@@ -182,46 +176,6 @@ async function pruneAssets(validPathSet) {
 		return dead.length;
 	} catch {
 		return 0;
-	}
-}
-
-// —— 进度/日志:迁移必须可观测,否则 put 间歇失败时压根看不出卡在哪 ——
-
-async function readMeta(key) {
-	try {
-		const db = await openAssetDB();
-		return (await req(db.transaction(META, "readonly").objectStore(META).get(key))) ?? null;
-	} catch {
-		return null;
-	}
-}
-
-async function writeMeta(key, value) {
-	try {
-		const db = await openAssetDB();
-		const tx = db.transaction(META, "readwrite");
-		tx.objectStore(META).put(value, key);
-		await new Promise(resolve => {
-			tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
-		});
-	} catch {
-		/* 进度写不进去不影响正确性,最多下次重新扫一遍已有 key */
-	}
-}
-
-/**
- * 追加一条迁移日志(只留最近 200 条,够定位问题又不会无限涨)。
- * 【为什么日志要落库】这不是临时埋点:put 会间歇失败(287876)、SW 随时被回收、
- * standalone 下看不到 console —— 出问题时唯一能事后翻的东西就是它。
- */
-async function logMigration(line) {
-	try {
-		const cur = (await readMeta("log")) || [];
-		cur.push(line);
-		while (cur.length > 200) cur.shift();
-		await writeMeta("log", cur);
-	} catch {
-		/* 日志失败绝不影响主流程 */
 	}
 }
 
