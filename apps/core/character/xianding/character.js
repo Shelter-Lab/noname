@@ -77,14 +77,6 @@ const characters = {
 		groupInGuozhan: "shu",
 		dieAudios: ["shen_guanyu"],
 	},
-	dc_shen_liubei: {
-		sex: "male",
-		group: "shen",
-		hp: 6,
-		skills: ["dclongnu", "dcjieying"],
-		groupInGuozhan: "shu",
-		dieAudios: ["shen_liubei"],
-	},
 	dc_shen_zhangliao: {
 		sex: "male",
 		group: "shen",
@@ -104,7 +96,7 @@ const characters = {
 		sex: "male",
 		group: "qun",
 		hp: 4,
-		skills: ["wudou", "jiandao"],
+		skills: ["shifeng", "jiandao"],
 		// 无自有立绘,复用同一人物的本体立绘(上游未提供 dc_xia_wangyue 的图)
 		img: "image/character/ns_wangyue.jpg",
 	},

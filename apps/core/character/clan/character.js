@@ -135,7 +135,7 @@ const characters = {
 		sex: "male",
 		group: "shu",
 		hp: 3,
-		skills: ["clanchengwang", "clanzhugezhan"],
+		skills: ["clanchengwang", "clanfenshi"],
 		names: "诸葛|瞻",
 		clans: ["琅琊诸葛氏"],
 		// 无自有立绘,复用同一人物的本体立绘(上游未提供 clan_zhugezhan 的图)
