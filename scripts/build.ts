@@ -78,7 +78,12 @@ console.log("生成 PWA 资源清单");
 	// 核心:启动 + 标准对局必需的代码/UI/数据(不含花体字、武将立绘、语音)。
 	// 由 SW 在 install 阶段预缓存,保证断网也能稳定启动、进模式、玩标准局。
 	const coreDirs = ["noname", "_virtual", "node_modules", "layout", "theme", "game", "mode", "card", "character"];
-	const core = new Set<string>(["./index.html", "./noname.js", "./manifest.webmanifest", "./pwa-version.json"]);
+	// 【pwa-asset-db-esm.js 必须进核心清单】下载器 `await import()` 它,离线时没预缓存
+	// 就会 import 失败 → 走 catch 退回 Cache Storage,素材库形同虚设(而且不报错、难发现)。
+	// 下面那段"根目录散文件"的规则有 `!rel.startsWith("pwa-")`,会把它排除掉,故在这里显式加。
+	// classic 版(pwa-asset-db.js)不必加:SW 用 importScripts 加载它,而 SW 自身及其
+	// importScripts 的脚本由浏览器按 SW 更新机制自己管,不走 Cache Storage 预缓存。
+	const core = new Set<string>(["./index.html", "./noname.js", "./manifest.webmanifest", "./pwa-version.json", "./pwa-asset-db-esm.js"]);
 	for (const d of coreDirs) {
 		for (const f of await listAssets(d)) core.add(f);
 	}
@@ -183,6 +188,20 @@ console.log("生成 PWA 资源清单");
 		throw new Error("pwa-sw.js 里找不到 __BUILD_STAMP__ 占位符——戳没注入进去的话,SW 字节恒定,更新机制会静默失效");
 	}
 	await fs.writeFile("dist/pwa-sw.js", swSource.replaceAll("__BUILD_STAMP__", buildStamp));
+
+	// 素材仓库(IndexedDB)要出两份:同一份源码,两种模块格式。
+	// 【为什么必须两份】SW 是 classic worker(register 没带 type:"module"),只能 importScripts,
+	// 用不了 ESM;而页面侧的下载器是 ES 模块,只能 import。源文件写成"无 export 的裸函数",
+	// 于是 classic 版直接用,ESM 版在末尾补一行 export —— 逻辑只有一处,不会两边走样。
+	const dbSource = await fs.readFile("apps/core/pwa-asset-db.js", "utf8");
+	await fs.writeFile("dist/pwa-asset-db.js", dbSource);
+	const dbExports = ["openAssetDB", "readAsset", "putAsset", "putAssets", "getAssetKeys", "countAssets", "pruneAssets", "readMeta", "writeMeta", "logMigration", "guessMime"];
+	for (const name of dbExports) {
+		if (!new RegExp(`function ${name}\\b`).test(dbSource)) {
+			throw new Error(`pwa-asset-db.js 里找不到 ${name}——ESM 版会导出一个不存在的名字,页面侧 import 直接报错`);
+		}
+	}
+	await fs.writeFile("dist/pwa-asset-db-esm.js", `${dbSource}\nexport { ${dbExports.join(", ")} };\n`);
 
 	// index.html 里也埋一份:window.__PWA_RUNNING_BUILD__ = "页面正在跑的构建"。
 	// 【为什么不能只有 pwa-version.json】那个文件读到的是缓存里哪一版,不是页面内存里跑的哪一版

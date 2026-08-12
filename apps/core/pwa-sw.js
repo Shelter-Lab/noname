@@ -43,6 +43,22 @@ const BUILD = "__BUILD_STAMP__";
 const CODE_CACHE = "noname-code-v1";
 const ASSET_CACHE = "noname-pwa-v2";
 
+// —— 素材仓库(IndexedDB):治病因七的那一刀 ——
+// 【为什么用 importScripts 而不是 import】register("./pwa-sw.js") 没带 { type: "module" },
+// 这是个 classic worker,ESM import 语法直接是语法错误、整个 SW 装不上。改 type 会让
+// 老浏览器/老注册记录出问题,不值当,故用 classic 的 importScripts。
+// 【为什么放在顶层而不是懒加载】它只是几个函数定义,解析成本微秒级;而 fetch 事件里
+// 用得到,懒加载反而要处理"还没加载完就来请求"的竞态。
+// 【失败必须吞掉】importScripts 抛异常会让整个 SW 装不上 → 全站白屏。素材库只是加速层,
+// 读不到就回退 Cache Storage,绝不能因为它挂了把主路径带走。
+let assetDBReady = false;
+try {
+	importScripts("./pwa-asset-db.js");
+	assetDBReady = typeof readAsset === "function";
+} catch (e) {
+	console.warn("[pwa-sw] 素材库加载失败,回退纯 Cache Storage:", e);
+}
+
 // 【记忆化 caches.open:一次 SW 生命周期只开一次,不是每个请求开一次】
 // 原来三处分支(导航 / 清单 / 主分支)各自 `await caches.open(CACHE)`,等于每个 fetch 事件
 // 都开一遍。open 本身不是零成本(见上),700 次 × 大桶 = 纯浪费。
@@ -637,6 +653,17 @@ self.addEventListener("fetch", event => {
 			// 【分桶看"在不在核心清单里",不看是不是代码】见 isBootAsset 处说明:上一版拿
 			// isCodeAsset 兼当分桶判据,导致 103 个启动期素材(splash/theme 背景/字体)仍然
 			// 每次冷启动都去开上万条的大桶,拆桶的收益被这个触发器抵掉了。
+			// 【素材优先查 IndexedDB —— 这是不碰 Cache Storage 的快路径】
+			// 只有非代码文件走这里:代码仍住 Cache Storage(746 条,不构成病因七的成本),
+			// 且它有整版原子一致的要求(BUILD_KEY/STALE_KEY 那套),搬走反而要重做一遍。
+			// 【为什么放在 openCode/openAsset 之前】病因七的账是"第一次碰 Cache Storage"就付,
+			// 排在后面就等于已经付过了、白查一趟。
+			// 【下载器豁免】它带 cache:"no-cache",本意就是"给我网络上的真东西"用来填库,
+			// 若在这里命中库就永远填不进新内容。
+			if (assetDBReady && req.cache !== "no-cache" && !isCodeAsset(url.pathname)) {
+				const fromDB = await readAsset(url.pathname);
+				if (fromDB) return fromDB;
+			}
 			const isBoot = await isBootAsset(url.pathname);
 			const cache = isBoot ? await openCode() : await openAsset();
 			// 【boot 资源要兜底查一次大桶】老用户升到这一版时 boot 桶里还没有这 103 个素材

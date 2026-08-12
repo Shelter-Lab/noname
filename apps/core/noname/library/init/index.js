@@ -52,20 +52,14 @@ export class LibInit {
 			const allList = await allResp.json();
 			/** @type {string[]} */
 			const all = [...new Set([...coreList, ...allList])];
-			// 【两个桶,桶名与判据都必须与 pwa-sw.js 严格一致】代码进小桶、素材进大桶,
-			// 否则下载的内容 SW 从另一个桶找、等于没缓存。
-			// 拆桶的原因见 pwa-sw.js 头部:单桶混装 14000+ 条时,启动路径每个请求的
-			// caches.open + cache.match 都要在这么大的桶上走一遍,把 SW 单线程堵死。
+			// 【代码进 Cache Storage,素材进 IndexedDB】这是治「iOS 冷启动 15.8 秒」的关键改动,
+			// 详见 TROUBLESHOOTING 病因七与 pwa-asset-db.js 头部。要点:WebKit 的 caches.open() 会扫
+			// 该 origin 下**每个桶的每一条 record**,成本正比于条目数、与字节数无关,且账按 origin 算
+			// —— 所以拆桶无效(已实测+源码双证),唯一杠杆是把两万个素材从 Cache Storage 里拿出去。
+			// 代码只有 746 条,留着不碍事,而且它有「整版原子一致」的要求(BUILD_KEY/STALE_KEY),
+			// 搬走反而要把那套机制重做一遍。
+			// 判据与 pwa-sw.js 的 isCodeAsset 必须严格一致,否则写进 A、从 B 读 = 等于没缓存。
 			const codeCache = await caches.open("noname-code-v1");
-			const assetCache = await caches.open("noname-pwa-v2");
-			// 【分桶判据 = 在不在核心清单里,必须与 pwa-sw.js 的 isBootAsset 完全一致】
-			// 上一版这里复制的是 isCodeAsset(按扩展名),于是核心清单里那 103 个启动期素材
-			// (11 张 splash、theme/style 下 62 张背景、基础字体…)被写进大桶,而 SW 改从
-			// boot 桶找 —— 写进 A 桶、从 B 桶读,等于没缓存,启动照样得去开上万条的大桶。
-			// coreList 就在手上(上面刚 fetch 过),直接拿它当判据,不必再猜。
-			// 【coreList 拿不到时必须退回扩展名判据,不能让 bootSet 空着】空 Set 会把**代码也
-			// 判成素材**全写进大桶,而 SW 从 boot 桶读代码 → 整个本体读不到 → 白屏。
-			// 退化路径与 pwa-sw.js 的 isBootAsset 读不到清单时一致(都退回 isCodeAsset)。
 			const CODE_EXT = /\.(js|mjs|ts|css|html|json|webmanifest)$/i;
 			const CODE_DIRS = ["noname", "_virtual", "node_modules", "layout", "theme", "game", "mode", "card", "character"];
 			const isCodeAsset = pathname => {
@@ -75,24 +69,32 @@ export class LibInit {
 				if (slash === -1) return true; // 根目录散文件
 				return CODE_DIRS.includes(rel.slice(0, slash));
 			};
-			const bootSet = coreList.length ? new Set(coreList.map(p => new URL(p, location.href).pathname)) : null;
-			const isBoot = url => {
-				const p = new URL(url, location.href).pathname;
-				return bootSet ? bootSet.has(p) : isCodeAsset(p);
-			};
-			const cacheFor = url => (isBoot(url) ? codeCache : assetCache);
+			const pathOf = url => new URL(url, location.href).pathname;
+			// 【素材库加载失败要能退回老路】素材照样写 Cache Storage,慢但能用 ——
+			// 绝不能因为新仓库不可用就让「下载离线资源」整个失效。
+			let db = null;
+			try {
+				db = await import(/* @vite-ignore */ `${rootURL}pwa-asset-db-esm.js`);
+			} catch (e) {
+				console.warn("素材库不可用,本次下载回退 Cache Storage:", e);
+			}
+			const legacyAssetCache = db ? null : await caches.open("noname-pwa-v2");
 
-			// 计算待下载(跳过已缓存)以支持续传。
-			// 用 cache.keys() 一次性取全部已缓存 URL 做成 Set 再比对——
-			// 避免逐个 await cache.match(1.4万次)的密集查询把 iOS 主线程搞崩(下载完再点会白屏)。
-			// 【两个桶的 key 要合起来算】否则代码那 600 多个会被判成"未缓存"每次重下。
-			const cachedKeys = [...(await codeCache.keys()), ...(await assetCache.keys())];
-			const cachedSet = new Set(cachedKeys.map(r => new URL(r.url).pathname));
-			const pending = all.filter(url => {
-				// 清单里是 "./image/x.png",缓存 key 是完整 URL,统一用 pathname 比对
-				const path = new URL(url, location.href).pathname;
-				return !cachedSet.has(path);
-			});
+			// 计算待下载(跳过已有)以支持续传。
+			// 【两个仓库的已有 key 要合起来算】否则代码那 700 多个或素材会被判成「未缓存」每次重下。
+			// 用 keys()/getAllKeys() 一次性取回做 Set 再比对 —— 避免逐个探测 1.4 万次把主线程搞崩
+			// (这是历史上「下载完再点会白屏」的成因,别改回逐条 match)。
+			const cachedSet = new Set([...(await codeCache.keys())].map(r => new URL(r.url).pathname));
+			if (db) {
+				for (const k of await db.getAssetKeys()) cachedSet.add(k);
+				// 【顺手清掉清单里已不存在的旧素材】改名/下架过的历史残留没有任何代码会清理,而它们
+				// 照样占条目数(实测缓存里比清单多约 6000 条)。以最新构建产物为唯一事实源。
+				const pruned = await db.pruneAssets(new Set(all.map(pathOf)));
+				if (pruned) console.log(`[素材库] 清掉 ${pruned} 条清单外的旧素材`);
+			} else {
+				for (const r of await legacyAssetCache.keys()) cachedSet.add(new URL(r.url).pathname);
+			}
+			const pending = all.filter(url => !cachedSet.has(pathOf(url)));
 			const total = all.length;
 			let done = total - pending.length; // 已缓存的算作已完成
 			let quotaExceeded = false;
@@ -109,23 +111,45 @@ export class LibInit {
 
 			// 并发受控地逐批下载(CF 走 HTTP/2 多路复用,12 并发可用且更快)
 			const CONCURRENCY = 12;
+			// 【写失败要记下来重试,不能默默丢】WebKit 287876:iOS 18 PWA 下 IDB 的 put 会**间歇性**
+			// 失败(至今未修)。两万条里出几条几乎是必然,而丢掉的素材表现为「玩到那里才发现是剪影」,
+			// 极难事后定位 —— 所以攒起来在末尾统一重试一轮,仍失败的如实报数并写进库内日志。
+			const writeFailed = [];
 			for (let i = 0; i < pending.length; i += CONCURRENCY) {
 				if (lib.init._offlineDownloadAbort) break;
 				const batch = pending.slice(i, i + CONCURRENCY);
+				const fetched = [];
 				const results = await Promise.allSettled(
 					batch.map(async url => {
 						const r = await fetch(url, { cache: "no-cache" });
-						if (r && r.status === 200) {
-							// iOS 不接受 redirected 响应:重定向的先用响应体重建干净副本再缓存
-							let toCache = r.clone();
-							if (r.redirected) {
-								const body = await r.clone().blob();
-								toCache = new Response(body, { status: r.status, statusText: r.statusText, headers: r.headers });
-							}
-							await cacheFor(url).put(url, toCache);
+						if (!r || r.status !== 200) return;
+						if (db && !isCodeAsset(pathOf(url))) {
+							// 素材 → IndexedDB。【只存 ArrayBuffer,绝不存 Blob】WebKit 下 IDB 里的 Blob 会
+							// 每个落成一个独立 .blob 文件,等于把「万文件」问题原样搬过去(还有 235687 等
+							// 未修的损坏 bug)。代价是 MIME 不随 ArrayBuffer 走,必须单独存 —— 优先用服务器
+							// 给的 Content-Type,拿不到才按扩展名猜。
+							const buf = await r.arrayBuffer();
+							const mime = db.guessMime(pathOf(url), r.headers.get("Content-Type") || "");
+							fetched.push({ path: pathOf(url), buf, mime });
+							return;
 						}
+						// 代码(或素材库不可用时的一切)→ Cache Storage,行为与以前完全一致。
+						// iOS 不接受 redirected 响应:重定向的先用响应体重建干净副本再缓存。
+						let toCache = r.clone();
+						if (r.redirected) {
+							const body = await r.clone().blob();
+							toCache = new Response(body, { status: r.status, statusText: r.statusText, headers: r.headers });
+						}
+						const target = db ? codeCache : isCodeAsset(pathOf(url)) ? codeCache : legacyAssetCache;
+						await target.put(url, toCache);
 					})
 				);
+				// 【一个事务写一批,不是一条一个事务】IDB 每个事务都有固定开销,逐条开事务在两万条
+				// 量级上会慢一个数量级。
+				if (fetched.length) {
+					const { failed } = await db.putAssets(fetched);
+					if (failed.length) writeFailed.push(...fetched.filter(f => failed.includes(f.path)).map(f => f.path));
+				}
 				for (const res of results) {
 					if (res.status === "fulfilled") {
 						done++;
@@ -137,11 +161,38 @@ export class LibInit {
 				if (quotaExceeded) break;
 			}
 
+			// 重试写失败的那些(抖动多是瞬时的,重来一次成功率很高)
+			if (db && writeFailed.length && !lib.init._offlineDownloadAbort) {
+				setText(`重试 ${writeFailed.length} 个…`);
+				const retry = [];
+				for (const p of writeFailed) {
+					try {
+						const r = await fetch(p, { cache: "no-cache" });
+						if (r && r.status === 200) {
+							retry.push({ path: p, buf: await r.arrayBuffer(), mime: db.guessMime(p, r.headers.get("Content-Type") || "") });
+						}
+					} catch {}
+				}
+				const { failed } = await db.putAssets(retry);
+				writeFailed.length = 0;
+				writeFailed.push(...failed);
+				if (failed.length) {
+					// 写进库内日志:standalone 下看不到 console,出问题时这是唯一能事后翻的东西
+					await db.logMigration(`写失败 ${failed.length} 个(重试后仍失败): ${failed.slice(0, 20).join(", ")}`);
+					console.warn(`[素材库] 仍有 ${failed.length} 个写不进去`, failed.slice(0, 20));
+				}
+			}
+
 			if (quotaExceeded) {
 				alert(`已达设备缓存容量上限,离线资源部分缓存(${done}/${total})。\niOS 对网页缓存有容量限制,已缓存内容可离线使用。`);
 				setText("下载离线资源");
 			} else if (lib.init._offlineDownloadAbort) {
 				alert(`已暂停。当前已缓存 ${done}/${total},再次点击可继续。`);
+				setText("下载离线资源");
+			} else if (writeFailed.length) {
+				// 【写失败要如实告知】默默说「完成」而实际少了几十个素材,表现成"玩到那里才发现是剪影",
+				// 比当场报出来难查得多。再次点击会走续传补齐(它们不在已有 key 里)。
+				alert(`离线资源下载完成(${done}/${total}),但有 ${writeFailed.length} 个素材没写进本地库。\n再次点击「下载离线资源」可补齐。`);
 				setText("下载离线资源");
 			} else {
 				alert(`离线资源下载完成(${done}/${total})!断网也能玩了。`);
