@@ -172,22 +172,30 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 			 * 文件一个不少也全部绕开、每次冷启动重新联网取一遍 —— 首屏从 1.4s 变 4.2s(桌面千兆
 			 * 实测),手机 4G 上是 7~8 秒变 15 秒。而界面上以前完全看不出这个状态:版本号照样
 			 * 显示得好好的,"已是最新",人只觉得"明明缓存好了怎么还是慢"。故如实报出来。
-			 * @returns {Promise<{stamp:string|null,stale:number,entries:number}|null>}
+			 * @returns {Promise<{stamp:string|null,stale:number,code:number,assets:number}|null>}
 			 *          stamp = 缓存里这批代码的构建戳;stale = 还差几个文件没补齐;null = 读不到缓存
 			 */
 			async function inspectCache() {
 				if (!("caches" in window)) return null;
 				try {
-					var cache = await caches.open("noname-pwa-v2");
-					var rec = await cache.match("/__pwa_build__");
+					// 【必须读代码桶,不是素材桶】拆桶之后两个戳都由 install 写进代码桶
+					// noname-code-v1(见 pwa-sw.js 的 BUILD_KEY/STALE_KEY),这里却一直开着旧的
+					// 素材桶 noname-pwa-v2 —— 那儿压根没有戳,于是 stamp 恒为 null、恒不等于
+					// runningStamp,「检查更新」对**所有人**都误报「代码缓存不可信(缺少版本标记)」
+					// 并劝人重装 30MB。这就是"点检查更新就说缓存不可信、怎么点都更新不了"的成因。
+					var codeCache = await caches.open("noname-code-v1");
+					var rec = await codeCache.match("/__pwa_build__");
 					var stampInCache = rec ? await rec.text() : null;
-					var staleRec = await cache.match("/__pwa_stale__");
+					var staleRec = await codeCache.match("/__pwa_stale__");
 					var staleList = staleRec ? await staleRec.json() : [];
-					var keys = await cache.keys();
+					// 条目数分桶报:只报代码桶那 700 多条会让用户以为下过的 1GB 素材没了。
+					var codeKeys = await codeCache.keys();
+					var assetKeys = await (await caches.open("noname-pwa-v2")).keys();
 					return {
 						stamp: /^\d{10}$/.test(String(stampInCache || "")) ? stampInCache : null,
 						stale: Array.isArray(staleList) ? staleList.length : 0,
-						entries: keys.length,
+						code: codeKeys.length,
+						assets: assetKeys.length,
 					};
 				} catch (e) {
 					return null;
@@ -317,7 +325,7 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					}
 					// 一切正常。顺带把体检结果报出来 —— 以后再遇到"缓存好了怎么还慢",
 					// 这一行就能直接说明是不是缓存问题,不用再靠猜。
-					alert("已是最新版本(v" + latest + ")。" + (health ? "\n\n本地缓存:" + health.entries + " 个文件,代码版本 v" + health.stamp + "(一致,启动直接读缓存)" : ""));
+					alert("已是最新版本(v" + latest + ")。" + (health ? "\n\n本地缓存:代码 " + health.code + " 个 + 素材 " + health.assets + " 个,代码版本 v" + health.stamp + "(一致,启动直接读缓存)" : ""));
 				} catch (e) {
 					console.error("检查更新失败:", e);
 					alert("检查更新失败:" + (e && e.message ? e.message : e));

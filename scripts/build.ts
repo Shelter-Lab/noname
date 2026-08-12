@@ -148,7 +148,10 @@ console.log("生成 PWA 资源清单");
 	}
 	// 上面从核心剔掉的大块头收到这里:平时不装(省 install),但"下载离线资源"仍会缓存,
 	// 想要彻底全离线的用户不会因为这次瘦身少拿东西。
-	for (const f of [...(await listAssets("")), ...(await listAssets("node_modules"))]) {
+	// 【只扫 listAssets("")】它本身就是递归全 dist(含 node_modules),再单独扫一次
+	// node_modules 等于把命中的文件塞两遍 —— eslint 的 linter.js(3.07MB)原来就在清单里
+	// 出现两次,下载器白下一遍、cache.put 同一个 key 两次。
+	for (const f of await listAssets("")) {
 		if (!core.has(f) && NOT_CORE.some(re => re.test(f))) heavy.push(f);
 	}
 

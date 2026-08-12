@@ -526,7 +526,15 @@ self.addEventListener("fetch", event => {
 					.catch(() => null);
 
 				if (cached) {
-					bgUpdate; // 不 await,后台更新
+					// 【必须 waitUntil,不能写个裸表达式就走】原来这里是 `bgUpdate;` —— 一句什么都不做的
+					// 表达式语句,只是"不 await"。问题在于响应一返回,这个 fetch 事件就算处理完了,
+					// 浏览器随时可以回收 SW;而调用方恰恰常是 location.reload()(「检查更新」里点"现在刷新",
+					// 或用户自己下拉刷新)—— 页面拆掉、SW 被回收,那次写入就这么没了。
+					// 于是"本次给旧首页、同时把新的写回缓存"这个整个导航分支赖以成立的前提根本不保:
+					// 新 index.html 一直写不进去,而版本戳是打死在 index.html 里的 → 用户点了刷新、
+					// 重开一看戳还是老的(实测好几次都这样);index.html 里那套自修复同样永远到不了用户手里。
+					// waitUntil 让 SW 至少活到这次写入完成,代价仅是一次几十 KB 的后台请求(带超时,不会挂死)。
+					event.waitUntil(bgUpdate);
 					return await sanitizeResponse(cached);
 				}
 
@@ -575,8 +583,14 @@ self.addEventListener("fetch", event => {
 				// 清单/版本戳是 .json,isCodeAsset 判它为代码 → 放代码桶,与读取端一致。
 				// 离线兜底再查一次旧素材桶:老用户升级前这几个文件躺在那儿。
 				const cache = await openCode();
+				// 【超时绝不能吃默认的 2 秒】pwa-all-assets.json 有 479KB,手机 4G 上 2 秒本来就未必够;
+				// 更要命的是 install 正拿 cache:"reload" 重下 700 多个核心文件(约 30MB)时,SW 单线程
+				// 被自己塞满,任何请求都轻易超过 2 秒。而带 no-cache 的调用方(下载器 / index.html 的
+				// repair())都是用户点了按钮正在等、界面上还有进度条,该给足耐心;其余情况按 miss 的
+				// 默认档 8 秒(与 missTimeoutMs 的兜底档一致)。
+				const ms = req.cache === "no-cache" ? 20000 : 8000;
 				try {
-					const resp = await fetchSafe(req);
+					const resp = await fetchSafe(req, undefined, ms);
 					if (resp && resp.status === 200) {
 						const clean = await sanitizeResponse(resp.clone());
 						cache.put(req, clean);
@@ -585,6 +599,15 @@ self.addEventListener("fetch", event => {
 				} catch {
 					const cached = (await cache.match(req)) || (await (await openAsset()).match(req));
 					if (cached) return cached;
+					// 【带 no-cache 的请求绝不能收到下面那个假空清单】它明说了"我要网络上的真相",
+					// 而 repair() 给 URL 挂了一次性 bust 串 —— 缓存里必然未命中,于是只要网络抖一下
+					// 超了时,它拿到的就是「status 200 + []」这么个合法响应,filter 完长度为 0 →
+					// 抛「核心清单为空」→ 修复中止。每次都一样、永远修不好(实测连点几次全是它),
+					// 而且报错还把人往"没联网"上引,真因是这个假 200。给它真实的失败状态:
+					// repair() 会如实报「核心清单获取失败 504」,下载器走 coreResp.ok 的 [] 分支,都接得住。
+					if (req.cache === "no-cache") {
+						return new Response("离线且清单未缓存", { status: 504, statusText: "Offline" });
+					}
 					// 离线且无缓存:兜底体必须与消费方期待的类型一致 ——
 					// 清单是数组(下载器 `[...new Set([...coreList, ...allList])]` 展开,给对象会抛 not iterable),
 					// pwa-version.json 是对象。
