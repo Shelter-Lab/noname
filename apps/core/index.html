@@ -462,5 +462,99 @@
 			});
 		})();
 	</script>
+	<script>
+		// ===== 冷启动诊断面板(临时,查完 15 秒问题就整块删掉)=====
+		// 【为什么要有它】手机上没 DevTools,而"启动慢"到底慢在哪一直只能靠体感猜 ——
+		// 已经猜错好几轮了。这里用 PerformanceObserver 记下每个资源请求的耗时,启动完成后
+		// 在屏幕上角显示一行汇总,点一下展开最慢的 15 条。iOS 主屏 PWA 里直接能看。
+		// 【为什么不用 console】standalone 下看不到控制台,而接 Mac 的 Web Inspector 不是人人有。
+		(function () {
+			"use strict";
+			var t0 = performance.now();
+			var entries = [];
+			try {
+				new PerformanceObserver(function (list) {
+					list.getEntries().forEach(function (e) {
+						entries.push(e);
+					});
+				}).observe({ type: "resource", buffered: true });
+			} catch (e) {
+				return; // 不支持就算了,诊断面板不该影响启动
+			}
+			function fmt(ms) {
+				return ms < 1000 ? Math.round(ms) + "ms" : (ms / 1000).toFixed(1) + "s";
+			}
+			function show() {
+				var bootMs = window.__bootDoneAt || performance.now();
+				// 只统计首屏之前发出的请求 —— 之后的是玩游戏时按需加载的,不算启动成本
+				var boot = entries.filter(function (e) {
+					return e.startTime <= bootMs;
+				});
+				var slow = boot.slice().sort(function (a, b) {
+					return b.duration - a.duration;
+				});
+				// SW 命中判据:走了 SW 且没有真实网络传输(transferSize 为 0)。
+				// 注意 iOS 上部分字段可能缺失,故只做粗分类,不当精确数字用。
+				var fromSW = boot.filter(function (e) {
+					return e.transferSize === 0 && e.decodedBodySize > 0;
+				}).length;
+				var net = boot.filter(function (e) {
+					return e.transferSize > 0;
+				});
+				var bytes = net.reduce(function (s, e) {
+					return s + (e.transferSize || 0);
+				}, 0);
+				var box = document.createElement("div");
+				box.setAttribute(
+					"style",
+					"position:fixed;left:0;top:0;z-index:2147483646;background:rgba(0,0,0,.82);color:#0f0;" +
+						"font:11px/1.5 monospace;padding:4px 6px;max-width:100vw;max-height:60vh;overflow:auto;white-space:pre;"
+				);
+				var head =
+					"启动 " +
+					fmt(bootMs - t0) +
+					" | 请求 " +
+					boot.length +
+					" (缓存 " +
+					fromSW +
+					" / 网络 " +
+					net.length +
+					") | " +
+					(bytes / 1048576).toFixed(2) +
+					"MB\n点此展开最慢 15 条";
+				box.textContent = head;
+				var open = false;
+				box.addEventListener("click", function () {
+					open = !open;
+					if (!open) {
+						box.textContent = head;
+						return;
+					}
+					var lines = slow.slice(0, 15).map(function (e) {
+						var name = e.name.replace(location.origin, "");
+						if (name.length > 46) name = "…" + name.slice(-45);
+						return fmt(e.duration).padStart(6) + "  " + (e.transferSize > 0 ? "net" : "hit") + "  " + name;
+					});
+					// 累计耗时:请求是并发的,这个数一定大于墙钟时间。它的用处是分辨
+					// "少数几个特别慢"还是"几百个各慢一点" —— 前者头部占比高,后者摊得很平。
+					var total = boot.reduce(function (s, e) {
+						return s + e.duration;
+					}, 0);
+					box.textContent = head + "\n累计请求耗时 " + fmt(total) + "(并发,非墙钟)\n" + lines.join("\n");
+				});
+				document.body ? document.body.appendChild(box) : document.documentElement.appendChild(box);
+			}
+			// 等 init/index.ts 打上 __bootDoneAt(清看门狗那一刻)再统计;30 秒兜底,
+			// 免得启动真的挂住时连面板都看不到。
+			var waited = 0;
+			var timer = setInterval(function () {
+				waited += 250;
+				if (window.__bootDoneAt || waited >= 30000) {
+					clearInterval(timer);
+					setTimeout(show, 400); // 留一点余量让最后几个请求进 observer
+				}
+			}, 250);
+		})();
+	</script>
 	<script type="module" src="./noname/entry.ts"></script>
 </head>
