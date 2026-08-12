@@ -685,7 +685,9 @@ self.addEventListener("fetch", event => {
 	// 放在最前面:它不是真实资源,绝不能进缓存分支,也不该被 ALWAYS_404 之类拦掉。
 	if (url.pathname === "/__swdiag") {
 		event.respondWith(
-			new Response(JSON.stringify({ now: Date.now(), swBornAt: SWDIAG.t0, nav: SWDIAG.nav }), {
+			// 【probe 必须一起送出去】上一版漏了它:探针在 SW 里跑完、面板也写好了显示,
+			// 但这个响应体里没带 probe 字段 → 面板恒显示「探针:无数据」。
+			new Response(JSON.stringify({ now: Date.now(), swBornAt: SWDIAG.t0, nav: SWDIAG.nav, probe: SWDIAG.probe }), {
 				status: 200,
 				headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
 			})
