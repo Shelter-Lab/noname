@@ -232,7 +232,20 @@ async function sanitizeResponse(resp) {
 	});
 }
 
+// —— 素材更新的开窗:每个构建只开一次,不是每次冷启动 ——
+// 【为什么要有窗】素材只可能在"又部署了一版"时变,而换版必然伴随一次 install(SW 字节变了),
+// 那一次也必然在线(清单都是网络取的)。所以校验只需跟着 install 走一次。
+// 若不设窗、每次冷启动都问:在线是几十个 304 往返白占 SW 单线程,离线是各等满
+// missTimeoutMs,iOS 还会弹「蜂窝数据已关闭」—— 那正是 TROUBLESHOOTING 的病因三。
+// 【为什么用内存标记而不落盘】它不需要跨 SW 重启存活:SW 被回收后窗口自然关闭,而"窗关着"
+// 正是我们要的快路径;下次真换版又会有新的 install 重新开窗。丢了只是更快,没有正确性损失
+// (这与"正在下载"那种必须持久化的状态不同 —— 那个丢了会误杀下载)。
+let assetRevalidateWindow = false;
+
 self.addEventListener("install", event => {
+	// 换版了(只有 SW 字节变了才会走 install)→ 给素材开一次后台校验窗口,
+	// 让上游改过的立绘/语音能更新到素材库。之后每次冷启动窗口都是关的,一个校验请求都不发。
+	assetRevalidateWindow = true;
 	// install 阶段预缓存"启动+标准对局必需"的核心文件(约 33MB,清单由构建生成)。
 	// 保证断网时也能稳定启动、进模式、玩标准局。失败不阻塞安装(降级为访问即缓存)。
 	// 注:保持简单快速——曾加"重试3轮+对账709项"导致 install 变慢/在 Safari 上迟迟装不上,
@@ -653,7 +666,36 @@ self.addEventListener("fetch", event => {
 			// 若在这里命中库就永远填不进新内容。
 			if (assetDBReady && req.cache !== "no-cache" && !isCodeAsset(url.pathname)) {
 				const fromDB = await readAsset(url.pathname);
-				if (fromDB) return fromDB;
+				if (fromDB) {
+					// 【换版那一次后台问一句"变了没",变了就更新素材库】
+					// 这是"改过的立绘能自动换新"的唯一来源。注意**我们并不比对内容** ——
+					// 无条件再 fetch 一次,由 HTTP 协议层便宜地回答:浏览器自动带上
+					// If-None-Match(CF 静态托管给每个文件发 ETag),没变就回 304、零字节,
+					// status !== 200 于是不写;真变了才回 200 + 新字节。
+					// 【为什么只在换版那一次】素材只可能在又部署一版时变,而换版必然伴随一次
+					// install(SW 字节变了)。若每次冷启动都问,就是每次几十个 304 往返白占
+					// SW 单线程,离线时更要各等满超时(这正是病因三)。
+					// 【关键:写 IDB,不写 Cache Storage】上一版这段的去处是 cache.put ——
+					// 那会把素材塞进代码桶、把 15.8 秒悄悄养回来(见 dbf5b73ee)。有害的一直是
+					// 这个**去处**,不是"后台校验"这个行为本身,所以行为保留、去处改掉。
+					// 【waitUntil + 不 await】本次响应立刻用库里的旧字节返回,不等网络;
+					// 而 waitUntil 保证 SW 不会在写入完成前被回收(病因六踩过)。
+					if (assetRevalidateWindow && !looksOffline()) {
+						event.waitUntil(
+							fetchSafe(req)
+								.then(async resp => {
+									noteNetResult(true);
+									if (resp && resp.status === 200) {
+										const clean = await sanitizeResponse(resp.clone());
+										const buf = await clean.arrayBuffer();
+										await putAsset(url.pathname, buf, guessMime(url.pathname, clean.headers.get("Content-Type") || ""));
+									}
+								})
+								.catch(() => noteNetResult(false))
+						);
+					}
+					return fromDB;
+				}
 			}
 			// 【只剩一个桶了,不再分桶】素材走 IndexedDB(上面那段),能到这里的非代码请求
 			// 只有「素材库里还没有」这一种情况 —— 那就联网取,并由下载器负责填库。
@@ -707,12 +749,10 @@ self.addEventListener("fetch", event => {
 				// 故:代码文件只允许由 install 整版写入(cache:"reload" 全量),永不逐文件更新。
 				// 顺带每次启动省掉 600+ 个无用的后台请求。
 				//
-				// 【素材的后台校验分支已随迁移下线】原来这里对命中缓存的素材发后台 fetch 校验
-				// (且只在换版那一次开窗,见 assetRevalidateWindow)。现在走不到了:非代码请求在
-				// 本分支之前就已由 IndexedDB 应答并 return,能到这儿的 cached 一定是代码,
-				// 而代码**永不逐文件 revalidate**(理由见上一段:那是缓存混版的真正源头)。
-				// 留着反而危险 —— 它的 cache.put 会把素材写进代码桶,把病因七养回来。
-				// 素材的更新改由「下载离线资源」按清单补齐(它带 no-cache,拿的是网络真字节)。
+				// 【素材的后台校验已挪到 IndexedDB 命中处,不在这里】原来这段也管素材,但它的
+				// cache.put 会把素材写进代码桶、把病因七养回来(见 dbf5b73ee)。现在素材在更前面
+				// 就由 IDB 应答并 return 了,能到这儿的 cached 一定是代码 —— 而代码**永不逐文件
+				// revalidate**(理由见上一段:那是缓存混版的真正源头),所以这里什么都不做。
 				return await sanitizeResponse(cached);
 			}
 
