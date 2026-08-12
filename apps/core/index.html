@@ -470,7 +470,11 @@
 		// 【为什么不用 console】standalone 下看不到控制台,而接 Mac 的 Web Inspector 不是人人有。
 		(function () {
 			"use strict";
-			var t0 = performance.now();
+			// 【别用 performance.now() 当起点 —— 第一版就栽在这】now() 的原点是**导航开始**,
+			// 而这段内联脚本要等 SW 把 index.html 吐出来才执行。若 SW 花十几秒才给首页,t0 本身
+			// 已经是 14000,bootDone - t0 仍只有几百毫秒 —— 等于把最慢那段整个减掉。
+			// 实测正是如此:面板报 470ms,人等了 15 秒。故起点固定为 0(= 导航开始)。
+			var t0 = 0;
 			var entries = [];
 			try {
 				new PerformanceObserver(function (list) {
@@ -493,10 +497,13 @@
 				var slow = boot.slice().sort(function (a, b) {
 					return b.duration - a.duration;
 				});
-				// SW 命中判据:走了 SW 且没有真实网络传输(transferSize 为 0)。
+				// 【第一版的 hit/net 分类是错的】拿 transferSize/decodedBodySize 判命中,但 WebKit 上
+				// 这两个字段大量返回 0 —— 实测出现「请求 646 (缓存 0 / 网络 144)」,0+144≠646。
+				// 改用 workerStart:>0 就说明该请求确实进了 SW,这个字段可靠;而且
+				// responseStart-workerStart 正好是 SW 处理它的耗时。
 				// 注意 iOS 上部分字段可能缺失,故只做粗分类,不当精确数字用。
 				var fromSW = boot.filter(function (e) {
-					return e.transferSize === 0 && e.decodedBodySize > 0;
+					return e.workerStart > 0;
 				}).length;
 				var net = boot.filter(function (e) {
 					return e.transferSize > 0;
@@ -510,18 +517,19 @@
 					"position:fixed;left:0;top:0;z-index:2147483646;background:rgba(0,0,0,.82);color:#0f0;" +
 						"font:11px/1.5 monospace;padding:4px 6px;max-width:100vw;max-height:60vh;overflow:auto;white-space:pre;"
 				);
+				// 把「拿到 HTML」这一刀切出来:导航阶段(含 SW 处理导航请求)vs 之后的模块加载。
+				// 15 秒花在 SW 吐首页之前还是之后,治法完全不同,这一刀是关键。
+				var nav = performance.getEntriesByType("navigation")[0];
+				var htmlAt = nav ? nav.responseEnd : 0;
+				// SW 里排队+处理的累计。若它接近墙钟,瓶颈就是「每请求过一遍 SW」,与缓存条数无关。
+				var swMs = boot.reduce(function (s2, e) {
+					return s2 + (e.workerStart > 0 && e.responseStart > e.workerStart ? e.responseStart - e.workerStart : 0);
+				}, 0);
 				var head =
-					"启动 " +
-					fmt(bootMs - t0) +
-					" | 请求 " +
-					boot.length +
-					" (缓存 " +
-					fromSW +
-					" / 网络 " +
-					net.length +
-					") | " +
-					(bytes / 1048576).toFixed(2) +
-					"MB\n点此展开最慢 15 条";
+					"总 " + fmt(bootMs) + " = 首页 " + fmt(htmlAt) + " + 之后 " + fmt(bootMs - htmlAt) +
+					" | 请求 " + boot.length + " (过SW " + fromSW + ")" +
+					" | " + (bytes / 1048576).toFixed(2) + "MB | SW累计 " + fmt(swMs) +
+					"\n点此展开最慢 15 条";
 				box.textContent = head;
 				var open = false;
 				box.addEventListener("click", function () {
@@ -533,7 +541,8 @@
 					var lines = slow.slice(0, 15).map(function (e) {
 						var name = e.name.replace(location.origin, "");
 						if (name.length > 46) name = "…" + name.slice(-45);
-						return fmt(e.duration).padStart(6) + "  " + (e.transferSize > 0 ? "net" : "hit") + "  " + name;
+						var sw = e.workerStart > 0 && e.responseStart > e.workerStart ? e.responseStart - e.workerStart : 0;
+						return fmt(e.duration).padStart(6) + " sw" + fmt(sw).padStart(6) + "  " + name;
 					});
 					// 累计耗时:请求是并发的,这个数一定大于墙钟时间。它的用处是分辨
 					// "少数几个特别慢"还是"几百个各慢一点" —— 前者头部占比高,后者摊得很平。
