@@ -58,6 +58,14 @@ export class LibInit {
 			// caches.open + cache.match 都要在这么大的桶上走一遍,把 SW 单线程堵死。
 			const codeCache = await caches.open("noname-code-v1");
 			const assetCache = await caches.open("noname-pwa-v2");
+			// 【分桶判据 = 在不在核心清单里,必须与 pwa-sw.js 的 isBootAsset 完全一致】
+			// 上一版这里复制的是 isCodeAsset(按扩展名),于是核心清单里那 103 个启动期素材
+			// (11 张 splash、theme/style 下 62 张背景、基础字体…)被写进大桶,而 SW 改从
+			// boot 桶找 —— 写进 A 桶、从 B 桶读,等于没缓存,启动照样得去开上万条的大桶。
+			// coreList 就在手上(上面刚 fetch 过),直接拿它当判据,不必再猜。
+			// 【coreList 拿不到时必须退回扩展名判据,不能让 bootSet 空着】空 Set 会把**代码也
+			// 判成素材**全写进大桶,而 SW 从 boot 桶读代码 → 整个本体读不到 → 白屏。
+			// 退化路径与 pwa-sw.js 的 isBootAsset 读不到清单时一致(都退回 isCodeAsset)。
 			const CODE_EXT = /\.(js|mjs|ts|css|html|json|webmanifest)$/i;
 			const CODE_DIRS = ["noname", "_virtual", "node_modules", "layout", "theme", "game", "mode", "card", "character"];
 			const isCodeAsset = pathname => {
@@ -67,7 +75,12 @@ export class LibInit {
 				if (slash === -1) return true; // 根目录散文件
 				return CODE_DIRS.includes(rel.slice(0, slash));
 			};
-			const cacheFor = url => (isCodeAsset(new URL(url, location.href).pathname) ? codeCache : assetCache);
+			const bootSet = coreList.length ? new Set(coreList.map(p => new URL(p, location.href).pathname)) : null;
+			const isBoot = url => {
+				const p = new URL(url, location.href).pathname;
+				return bootSet ? bootSet.has(p) : isCodeAsset(p);
+			};
+			const cacheFor = url => (isBoot(url) ? codeCache : assetCache);
 
 			// 计算待下载(跳过已缓存)以支持续传。
 			// 用 cache.keys() 一次性取全部已缓存 URL 做成 Set 再比对——

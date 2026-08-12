@@ -75,6 +75,53 @@ function isCodeAsset(pathname) {
 	return CODE_DIRS.includes(rel.slice(0, slash));
 }
 
+// —— 分桶的判据:「在不在核心清单里」,而不是 isCodeAsset ——
+//
+// 【上一版拆桶为什么没治好】把桶拆开时,我拿 isCodeAsset 兼当了分桶判据。但这是两个
+// **不同的问题**,当时混成了一个:
+//   · isCodeAsset 回答的是"这文件必须整版原子一致吗" —— 只有可执行代码才有跨 chunk
+//     绑定问题,所以它按扩展名筛,.png/.jpg/.woff2 一律为 false。这个语义是对的,不动。
+//   · 分桶要回答的是"这文件在启动路径上吗" —— 与它是不是代码毫无关系。
+// 于是核心清单 726 条里有 103 条(11 张 splash、ol_bg、卡背手牌框、theme/style 下 62 张
+// CSS 背景图、2 个基础字体…)被判成"素材",**每次冷启动照样去开那个上万条的大桶**。
+// 等于把代码挪走了,却把"必然触发打开大桶"的触发器原地留下 —— 实测症状完全对得上:
+// 只缓存核心时快(大桶里才 103 条),下到 8000 多个素材就又慢了(大桶跟着涨)。
+//
+// 【为什么改用核心清单做判据】它就是"启动+标准对局要用什么"的唯一事实源,由 build.ts
+// 生成、install 整批装齐,天然与分桶要问的问题同构。实测两个方向都零误判:
+//   · 核心清单 726 条 → 全部进 boot 桶(原来只有 623 条)
+//   · 全量清单 14352 条 → 落进 boot 桶的 0 条
+// (对比:若改成"CODE_DIRS 下不看扩展名",会把 heavy 里 3 条误吸进来 —— 仍不如清单精确。)
+let bootSetPromise = null;
+function getBootSet() {
+	if (!bootSetPromise) {
+		bootSetPromise = (async () => {
+			try {
+				// 清单自己也在自己的清单里(见 build.ts),故 install 装齐后必在 boot 桶。
+				const cache = await openCode();
+				const r = (await cache.match("./pwa-core-assets.json")) || (await cache.match("/pwa-core-assets.json"));
+				if (!r) return null;
+				const list = await r.json();
+				if (!Array.isArray(list) || !list.length) return null;
+				return new Set(list.map(p => new URL(p, self.location.href).pathname));
+			} catch {
+				return null;
+			}
+		})();
+	}
+	return bootSetPromise;
+}
+
+/**
+ * 这个请求该走 boot 桶(小、启动路径)还是素材大桶?
+ * 【读不到清单时退回 isCodeAsset】那是上一版的行为,至少保证代码仍在小桶里,不会更差。
+ */
+async function isBootAsset(pathname) {
+	const set = await getBootSet();
+	if (!set) return isCodeAsset(pathname);
+	return set.has(pathname);
+}
+
 // 这些运行期动态接口即使残留也绝不缓存(纯静态部署下不存在,双保险)
 const BYPASS = ["/checkFile", "/checkDir", "/readFile", "/readFileAsText", "/writeFile", "/removeFile", "/getFileList", "/createDir", "/removeDir"];
 
@@ -200,7 +247,10 @@ self.addEventListener("install", event => {
 				// 完全一致,否则写进 A 桶、从 B 桶找,等于没缓存。
 				const codeCache = await openCode();
 				const assetCache = await openAsset();
-				const cacheFor = url => (isCodeAsset(new URL(url, self.location.href).pathname) ? codeCache : assetCache);
+				// install 装的就是核心清单本身 → 整份都归 boot 桶,不必再逐个判。
+				// 【为什么不能用 isBootAsset】它要读缓存里的清单,而这会儿清单正在被装;
+				// 更重要的是语义上根本不需要:list 就是核心清单,定义上全是 boot 资源。
+				const cacheFor = () => codeCache;
 				// 分批下载,避免一次性数百请求压垮 iOS;单批失败不影响其余。
 				// 用 fetch+sanitize 而非 cache.add,以便洗白重定向响应(iOS 不接受 redirected 缓存)。
 				// cache:"reload" 绕开浏览器 HTTP 缓存,确保拿到的是当前构建的真实内容而不是
@@ -283,6 +333,9 @@ self.addEventListener("install", event => {
 				// fetch 事件问过它(那时还没写 BUILD_KEY),内存里就存着 fresh:false,之后整个
 				// SW 生命周期都会让代码文件走网络——白白拖慢启动。这里装完立刻清掉重算。
 				codeStatePromise = null;
+				// 同理:install 期间若已有 fetch 事件问过 getBootSet(那时清单还没装完,它返回 null →
+				// 整个 SW 生命周期都退回 isCodeAsset,那 103 个启动期素材又会去开大桶)。装完立刻重算。
+				bootSetPromise = null;
 			} catch (e) {
 				// 清单都没拿到(离线/CDN 抽风/iOS 把后台的 install 掐了)→ 这一版没换成。
 				//
@@ -329,6 +382,9 @@ self.addEventListener("install", event => {
 					/* 缓存都开不了,交给下次 install */
 				}
 				codeStatePromise = null;
+				// 同理:install 期间若已有 fetch 事件问过 getBootSet(那时清单还没装完,它返回 null →
+				// 整个 SW 生命周期都退回 isCodeAsset,那 103 个启动期素材又会去开大桶)。装完立刻重算。
+				bootSetPromise = null;
 			}
 			await self.skipWaiting();
 		})()
@@ -359,6 +415,9 @@ self.addEventListener("activate", event => {
 // 返回 { fresh, stale:Set } —— fresh 为 false 时全部代码文件走网络;
 // fresh 为 true 时只有 stale 里点名的那几个走网络,其余照旧 SWR(启动速度不变)。
 let codeStatePromise = null;
+// 同理:install 期间若已有 fetch 事件问过 getBootSet(那时清单还没装完,它返回 null →
+// 整个 SW 生命周期都退回 isCodeAsset,那 103 个启动期素材又会去开大桶)。装完立刻重算。
+bootSetPromise = null;
 function getCodeState() {
 	if (!codeStatePromise) {
 		codeStatePromise = (async () => {
@@ -544,11 +603,18 @@ self.addEventListener("fetch", event => {
 			// 一遍 —— 桶里 730 条时快,14993 条时慢,而这全排在 SW 的单线程上。
 			// 现在:代码请求只碰 ~633 条的代码桶,素材请求才碰大桶;而素材是图片/音频,
 			// 不在 boot 的 await 链上,慢一点不阻塞启动。
+			// 【分桶看"在不在核心清单里",不看是不是代码】见 isBootAsset 处说明:上一版拿
+			// isCodeAsset 兼当分桶判据,导致 103 个启动期素材(splash/theme 背景/字体)仍然
+			// 每次冷启动都去开上万条的大桶,拆桶的收益被这个触发器抵掉了。
+			const isBoot = await isBootAsset(url.pathname);
+			const cache = isBoot ? await openCode() : await openAsset();
+			// 【boot 资源要兜底查一次大桶】老用户升到这一版时 boot 桶里还没有这 103 个素材
+			// (要等 install 装完),而它们此前就躺在大桶里。这一瞬若离线,读不到就白屏/缺图。
+			// 装齐后 cache.match 先命中,这一路不再走。
+			const cached = (await cache.match(req)) || (isBoot ? await (await openAsset()).match(req) : null);
+			// 「要不要整版原子一致」仍由 isCodeAsset 独立回答 —— 只有可执行代码才有跨 chunk
+			// 绑定问题,那 103 个图片/字体进了 boot 桶也不该走 Network-First。
 			const isCode = isCodeAsset(url.pathname);
-			const cache = isCode ? await openCode() : await openAsset();
-			// 【代码要兜底查一次旧桶】老用户升到这一版时代码桶还是空的(要等 install 装完)。
-			// 这一瞬若离线,读不到就白屏。装齐后 cache.match 先命中,这一路不再走。
-			const cached = (await cache.match(req)) || (isCode ? await (await openAsset()).match(req) : null);
 
 			// 代码文件且缓存不是当前构建的 → 缓存里可能是跨版本混搭的 chunk,不能信。
 			// 走 Network-First 现取现用(取到就写回),只有网络失败才退回旧缓存。
