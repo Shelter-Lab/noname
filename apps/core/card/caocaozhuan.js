@@ -334,7 +334,14 @@ export default {
 			type: "equip",
 			subtype: "equip5",
 			ai: { basic: { equipValue: 7 } },
-			skills: ["ccz_yuxi_skill", "ccz_yuxi_lose"],
+			// 【loseDelay: false + onLose】照白银狮子（extra.js:686）：装备离开的那一刻
+			// 就把监听技能挂到玩家身上，于是它能在装备技能被移除之后照样结算。
+			// ccz_yuxi_lose 不再列进 skills —— 它不是装备技能，而是失去时临时挂上的。
+			loseDelay: false,
+			async onLose(event, trigger, player) {
+				player.addTempSkill("ccz_yuxi_lose");
+			},
+			skills: ["ccz_yuxi_skill"],
 		},
 
 		/**
@@ -823,7 +830,26 @@ export default {
 			async content(event, trigger, player) {
 				trigger.cancel();
 			},
-		},
+		
+			ai: {
+				effect: {
+					// 判据与 filter 一致：来源与我的距离 ≥3 时【杀】无效 → 远处出杀零收益
+					target(card, player, target, current) {
+						if (target.hasSkillTag("unequip2")) {
+							return;
+						}
+						if (
+							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
+							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
+						) {
+							return;
+						}
+						if (card.name === "sha" && get.distance(player, target) >= 3) {
+							return "zeroplayertarget";
+						}
+					},
+				},
+			},},
 
 		// —— 连环铠：每回合只受一次【杀】造成的伤害 ——
 		ccz_lianhuankai_skill: {
@@ -844,7 +870,27 @@ export default {
 				trigger.cancel();
 			},
 			group: "ccz_lianhuankai_mark",
-		},
+		
+			ai: {
+				effect: {
+					// 本回合已受过一次【杀】伤害 → 之后的【杀】对我零收益。
+					// 判据用 hasSkill 查那个标记技能，与 filter 完全一致。
+					target(card, player, target, current) {
+						if (target.hasSkillTag("unequip2")) {
+							return;
+						}
+						if (
+							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
+							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
+						) {
+							return;
+						}
+						if (card.name === "sha" && target.hasSkill("ccz_lianhuankai_used", null, false)) {
+							return "zeroplayertarget";
+						}
+					},
+				},
+			},},
 		/** 记账用：本回合受过【杀】伤害就打个标记。靠 addTempSkill 的默认到期
 		 * （{ global: ["phaseAfter","phaseBeforeStart"] }，任意回合结束即清）——
 		 * 不是靠 clearTime，那个字段在本体库里只有两处 UI 判断，不清存储。 */
@@ -882,7 +928,26 @@ export default {
 			async content(event, trigger, player) {
 				trigger.cancel();
 			},
-		},
+		
+			ai: {
+				effect: {
+					// 属性伤害对我无效 → 带属性的牌打我零收益（火杀/雷杀/火攻/铁索连环的火雷…）
+					target(card, player, target, current) {
+						if (target.hasSkillTag("unequip2")) {
+							return;
+						}
+						if (
+							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
+							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
+						) {
+							return;
+						}
+						if (game.hasNature(card)) {
+							return "zeroplayertarget";
+						}
+					},
+				},
+			},},
 
 		// —— 白银铠：防止一切"无来源卡"的伤害（技能/效果造成的）——
 		ccz_baiyinkai_skill: {
@@ -908,7 +973,26 @@ export default {
 			async content(event, trigger, player) {
 				trigger.cancel();
 			},
-		},
+		
+			ai: {
+				effect: {
+					// 锦囊造成的伤害对我无效 → 伤害类锦囊打我零收益（火攻、决斗、南蛮、万箭…）
+					target(card, player, target, current) {
+						if (target.hasSkillTag("unequip2")) {
+							return;
+						}
+						if (
+							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
+							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
+						) {
+							return;
+						}
+						if (get.type2(card) === "trick" && get.tag(card, "damage")) {
+							return "zeroplayertarget";
+						}
+					},
+				},
+			},},
 
 		// —— 凤凰羽衣：回合开始回 1 体力 ——
 		ccz_fenghuangyuyi_skill: {
@@ -941,14 +1025,36 @@ export default {
 		 * 普通装备技能触发不到"自己被弃置"这件事。charlotte 让技能不随装备移除而立即失效，
 		 * 才能在 loseAfter 里跑完。本体 baiyin_skill 的 subSkill.lose 就是这个套路。
 		 */
+		/**
+		 * 玉玺失去时弃两张手牌。
+		 * 【为什么监听要挂在玩家身上，而不是装备技能自己等 loseAfter】
+		 * 装备离开时它的 equipSkill 会被一并移除 —— 等不到那个 after 事件就已经没了。
+		 * 本体白银狮子的正解是在**卡牌的 onLose** 里 addTempSkill（extra.js:692，
+		 * 配 loseDelay: false），把监听挪到玩家身上，不再依赖装备存活。见 ccz_yuxi 的 onLose。
+		 * 【触发清单照孙尚香〖枭姬〗抄】那是「失去装备区的牌」的标准写法，本卡正是它的反面
+		 * （枭姬摸两张 / 玉玺弃两张）。原先只写 player: "loseAfter"，漏掉
+		 * gainAfter（被【顺手牵羊】拿走）、equipAfter（被新装备换下）等一大半途径。
+		 * 判"这次失去里有没有玉玺"用 event.getl(player).es，别自己猜 event.cards。
+		 */
 		ccz_yuxi_lose: {
-			equipSkill: true,
 			charlotte: true,
-			trigger: { player: "loseAfter" },
 			forced: true,
+			popup: false,
+			trigger: {
+				player: "loseAfter",
+				global: ["equipAfter", "addJudgeAfter", "gainAfter", "loseAsyncAfter", "addToExpansionAfter"],
+			},
 			filter(event, player) {
-				// 这次失去的牌里有玉玺，且现在装备区已经没有了
-				return event.cards?.some(card => get.name(card) === "ccz_yuxi") && !player.getEquips("ccz_yuxi").length && player.countCards("h");
+				const evt = event.getl(player);
+				if (!evt || evt.player !== player || !evt.es?.length) {
+					return false;
+				}
+				// 这次失去的装备里有玉玺，且现在装备区确实没有了（换上第二张玉玺不该罚）
+				const lost = evt.es.some(card => {
+					const v = evt.vcard_map?.get(card);
+					return (v?.name || get.name(card)) === "ccz_yuxi";
+				});
+				return lost && !player.getEquips("ccz_yuxi").length && player.countCards("h") > 0;
 			},
 			async content(event, trigger, player) {
 				await player.chooseToDiscard("h", 2, true);
@@ -967,7 +1073,31 @@ export default {
 				trigger.cancel();
 				await player.recover();
 			},
-		},
+		
+			ai: {
+				effect: {
+					// 【必须用数组形式 [乘数, 加数]，单个数字表达不了】get.effect 里
+					// 数字分支走的是 result2 *= temp2 —— 那是**乘数**（get/index.js:7011）。
+					// 而 result2 对伤害牌本身是负值，所以返回 0.5 只是"伤害减半"，方向根本不对。
+					// 本卡的真实效果是「伤害归零 + 目标回 1 血」，那正是 [0, 回血收益]：
+					// 乘数 0 抹掉伤害，加数补上回血（result2 += temp02，见 get/index.js:7035）。
+					// 不写的话 AI 会往穿太平要术的人身上砸火杀 —— 那不是白扔，是**主动给敌人治疗**。
+					target(card, player, target, current) {
+						if (target.hasSkillTag("unequip2")) {
+							return;
+						}
+						if (
+							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
+							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
+						) {
+							return;
+						}
+						if (game.hasNature(card)) {
+							return [0, get.recoverEffect(target, player, target)];
+						}
+					},
+				},
+			},},
 
 		// —— 太平清领道：判定阶段开始时，可弃置判定区一张牌 ——
 		ccz_taipingqinglingdao_skill: {
