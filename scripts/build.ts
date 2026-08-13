@@ -203,6 +203,64 @@ console.log("生成 PWA 资源清单");
 	}
 	await fs.writeFile("dist/pwa-asset-db-esm.js", `${dbSource}\nexport { ${dbExports.join(", ")} };\n`);
 
+	// 卡牌包的顶层键必须是白名单里那几个。
+	// 【为什么需要这条】曹操传包曾因一个多余的 `},` 让 skill/translate 对象提前闭合,
+	// 后面的技能与译名全变成**顶层键**;loadCard 的 default 分支拿它们去取
+	// lib["ccz_xxx_skill"] → undefined → 整个 boot 崩在 splash 界面进不去游戏。
+	// 阴险之处:多的那个 `},` 与末尾少的那个正好相抵,所以 node --check 和 tsc 全过,
+	// 40 项自查也全过 —— 它们都是正则扫文本,不看对象嵌套结构。这里靠括号配平真查一遍。
+	const CARD_TOP_KEYS = ["name", "connect", "card", "skill", "translate", "list", "mode", "forbid", "help"];
+	for (const cardFile of await fs.readdir("apps/core/card")) {
+		if (!cardFile.endsWith(".js")) {
+			continue;
+		}
+		const src = await fs.readFile(`apps/core/card/${cardFile}`, "utf8");
+		const defAt = src.indexOf("export default {");
+		if (defAt < 0) {
+			continue;
+		}
+		let depth = 0;
+		const topKeys: string[] = [];
+		for (let i = src.indexOf("{", defAt); i < src.length; i++) {
+			const ch = src[i];
+			if (ch === "{" || ch === "[" || ch === "(") {
+				depth++;
+			} else if (ch === "}" || ch === "]" || ch === ")") {
+				depth--;
+				if (depth === 0) {
+					break;
+				}
+			} else if (ch === '"' || ch === "'" || ch === "`") {
+				// 跳过字符串字面量,免得里面的括号/冒号干扰配平
+				const quote = ch;
+				i++;
+				while (i < src.length && src[i] !== quote) {
+					if (src[i] === "\\") {
+						i++;
+					}
+					i++;
+				}
+			} else if (ch === "/" && src[i + 1] === "/") {
+				i = src.indexOf("\n", i);
+			} else if (ch === "/" && src[i + 1] === "*") {
+				i = src.indexOf("*/", i) + 1;
+			} else if (depth === 1 && /[A-Za-z_$]/.test(ch)) {
+				let end = i;
+				while (end < src.length && /[\w$]/.test(src[end])) {
+					end++;
+				}
+				if (src[end] === ":") {
+					topKeys.push(src.slice(i, end));
+				}
+				i = end - 1;
+			}
+		}
+		const strays = topKeys.filter(k => !CARD_TOP_KEYS.includes(k));
+		if (strays.length) {
+			throw new Error(`card/${cardFile} 的顶层键里混进了 ${strays.length} 个非法项(${strays.slice(0, 3).join(", ")}…)——` + `几乎一定是某处多了或少了一个 "}," 导致 skill/translate 提前闭合。loadCard 会拿它们去取 lib[键] 而崩在启动`);
+		}
+	}
+
 	// index.html 里也埋一份:window.__PWA_RUNNING_BUILD__ = "页面正在跑的构建"。
 	// 【为什么不能只有 pwa-version.json】那个文件读到的是缓存里哪一版,不是页面内存里跑的哪一版
 	// —— 新 SW 装好后两者就分叉了,「检查更新」按钮拿它比对必然误报"已是最新"(详见 index.html 处注释)。
