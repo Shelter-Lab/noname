@@ -212,6 +212,81 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 			}
 
 			/**
+			 * 素材是否有更新:比对构建产出的内容哈希清单与本地基线,精确算出变更集。
+			 *
+			 * 【为什么非得这么绕】素材存在 IndexedDB 里、键是 pathname。改了图但路径不变时,
+			 * 下载器的「跳过已有」判定它已存在就不再取,于是永远读旧字节 —— 这就是"卡面图不更新"
+			 * 的成因。而记录里只有 { buf, mime, len },没有 ETag,发不出 If-None-Match,
+			 * 想"校验"就只能把字节整个重下。代码没这问题:换版时 install 用 cache:"reload"
+			 * 整版重下核心清单,那条路绕开一切缓存;而素材不在核心清单里(image/card/ 的 581 张
+			 * 全在可下载清单),压根不走那条路。
+			 * 【为什么比清单不逐个问】1.4 万个素材逐个请求就是 1.4 万次往返;哈希清单一次下完
+			 * (约 600KB,CF 会 gzip),diff 出来就是精确的变更集,零多余流量。
+			 * 【基线为什么要本地算而不是直接存服务端清单】直接存服务端那份等于替本地撒谎:
+			 * 库里明明是旧字节,基线却声称与线上一致,之后永远 diff 不出差异。
+			 * 本地算能对上构建时的哈希,因为存进库的就是原始字节 —— 下载器用
+			 * `await r.arrayBuffer()`,SW 只在 resp.redirected 时重建 Response 且 body 原样搬。
+			 *
+			 * @returns {Promise<null | { changed: string[], added: string[], missingBaseline: boolean, db: any, hashes: Record<string,string> }>}
+			 */
+			async function inspectAssets() {
+				let db;
+				try {
+					db = await import(/* @vite-ignore */ `${lib.assetURL}pwa-asset-db-esm.js`);
+				} catch (e) {
+					return null; // 素材库不可用 → 这一项直接跳过,不影响版本检查
+				}
+				let hashes;
+				try {
+					var resp = await fetch("./pwa-asset-hashes.json", { cache: "no-cache" });
+					if (!resp.ok) return null;
+					hashes = await resp.json();
+				} catch (e) {
+					return null; // 老版本构建没有这个清单,或离线 → 跳过
+				}
+				// 只看素材,代码文件由 install 的整版重下负责(判据与下载器/SW 的 isCodeAsset 一致)
+				var CODE_EXT = /\.(js|mjs|ts|css|html|json|webmanifest)$/i;
+				var CODE_DIRS = ["noname", "_virtual", "node_modules", "layout", "theme", "game", "mode", "card", "character"];
+				var isCode = function (rel) {
+					if (!CODE_EXT.test(rel)) return false;
+					var slash = rel.indexOf("/");
+					if (slash === -1) return true;
+					return CODE_DIRS.includes(rel.slice(0, slash));
+				};
+				var baseline = await db.getBaseline();
+				var haveKeys = await db.getAssetKeys();
+				var changed = [];
+				var added = [];
+				for (var rel in hashes) {
+					var clean = rel.replace(/^\.\//, "");
+					if (isCode(clean)) continue;
+					var pathname = new URL(rel, location.href).pathname;
+					if (!haveKeys.has(pathname)) {
+						// 本地压根没有 → 归"新增"。这类原来就能靠「下载离线资源」补上,
+						// 这里只是把它一并报出来,让用户知道差多少。
+						added.push(rel);
+						continue;
+					}
+					if (baseline && baseline[pathname] && baseline[pathname] !== hashes[rel]) {
+						changed.push(rel);
+					}
+				}
+				return { changed: changed, added: added, missingBaseline: !baseline, db: db, hashes: hashes };
+			}
+
+			/** 下完之后把这批的哈希记进基线(只记真正写成功的) */
+			async function updateBaseline(db, hashes, urls, failedPaths) {
+				var baseline = (await db.getBaseline()) || {};
+				var failed = new Set(failedPaths || []);
+				for (var i = 0; i < urls.length; i++) {
+					var pathname = new URL(urls[i], location.href).pathname;
+					if (failed.has(pathname)) continue;
+					baseline[pathname] = hashes[urls[i]];
+				}
+				await db.saveBaseline(baseline);
+			}
+
+			/**
 			 * 强制重装核心代码文件。复用 index.html 里那套 __pwaRepair —— 它是唯一能绕开
 			 * "正在喂你旧字节的那个 SW" 的办法(给 URL 挂一次性查询串让 Cache Storage 必然未命中,
 			 * 逼 SW 走网络),重装完会把构建戳补上、清掉待补名单,然后自己刷新页面。
@@ -332,9 +407,50 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 							return;
 						}
 					}
+					// —— 代码是最新的,再看素材有没有变更(改了图但路径不变的那种,代码检查看不见) ——
+					btn.textContent = "检查素材…";
+					var assetInfo = await inspectAssets();
+					if (assetInfo) {
+						if (assetInfo.missingBaseline) {
+							// 【首次:先建基线】没有基线就无从知道本地哪些图是旧的。基线只能本地算 ——
+							// 直接采信服务端清单等于替本地撒谎,之后永远 diff 不出差异。
+							// 这一步纯本地(读库 + SHA-256),不联网、不耗流量,但要把素材读一遍。
+							if (confirm("已是最新版本(v" + latest + ")。\n\n素材基线尚未建立 —— 建立后才能精确知道哪些立绘/卡面有更新(改了图但文件名不变的那种,版本号看不出来)。\n\n现在建立?\n\n· 纯本地计算,不联网、不耗流量\n· 需要把已缓存的素材读一遍算校验值,素材多时要等一会儿\n· 只需做这一次,之后每次检查都是几百 KB 的清单比对")) {
+								btn.textContent = "建立基线 0…";
+								var map = await assetInfo.db.computeBaseline(function (n, all) {
+									btn.textContent = "建立基线 " + n + "/" + all + "…";
+								});
+								await assetInfo.db.saveBaseline(map);
+								// 建完立刻用新基线再比一次,把本来就旧的那些当场报出来
+								var again = await inspectAssets();
+								var n1 = again ? again.changed.length : 0;
+								if (n1 > 0 && confirm("基线已建立(" + Object.keys(map).length + " 个素材)。\n\n发现 " + n1 + " 个素材与线上不一致(本地是旧版本),现在更新?")) {
+									var r1 = await lib.init.downloadOfflineAssets(btn, { onlyList: again.changed, silent: true });
+									await updateBaseline(again.db, again.hashes, again.changed, r1 && r1.failed);
+									alert("已更新 " + ((r1 ? r1.done : 0)) + "/" + n1 + " 个素材。" + (r1 && r1.failed.length ? "\n有 " + r1.failed.length + " 个没写进本地库,再点一次可补。" : "\n重新打开应用后生效。"));
+								} else {
+									alert("基线已建立(" + Object.keys(map).length + " 个素材)。" + (n1 > 0 ? "" : "\n本地素材与线上一致。"));
+								}
+								return;
+							}
+							// 用户选择不建 → 继续走下面的常规提示
+						} else if (assetInfo.changed.length > 0) {
+							if (confirm("已是最新版本(v" + latest + ")。\n\n但有 " + assetInfo.changed.length + " 个素材有更新(立绘/卡面等内容变了,文件名没变)。\n\n现在下载?只下这 " + assetInfo.changed.length + " 个,不动其余素材。")) {
+								var r2 = await lib.init.downloadOfflineAssets(btn, { onlyList: assetInfo.changed, silent: true });
+								await updateBaseline(assetInfo.db, assetInfo.hashes, assetInfo.changed, r2 && r2.failed);
+								alert("已更新 " + ((r2 ? r2.done : 0)) + "/" + assetInfo.changed.length + " 个素材。" + (r2 && r2.failed.length ? "\n有 " + r2.failed.length + " 个没写进本地库,再点一次可补。" : "\n重新打开应用后生效。"));
+								return;
+							}
+						}
+					}
+
 					// 一切正常。顺带把体检结果报出来 —— 以后再遇到"缓存好了怎么还慢",
 					// 这一行就能直接说明是不是缓存问题,不用再靠猜。
-					alert("已是最新版本(v" + latest + ")。" + (health ? "\n\n本地缓存:代码 " + health.code + " 个(Cache Storage)+ 素材 " + health.assets + " 个(素材库)\n代码版本 v" + health.stamp + "(一致,启动直接读缓存)" : ""));
+					alert(
+						"已是最新版本(v" + latest + ")。" +
+							(health ? "\n\n本地缓存:代码 " + health.code + " 个(Cache Storage)+ 素材 " + health.assets + " 个(素材库)\n代码版本 v" + health.stamp + "(一致,启动直接读缓存)" : "") +
+							(assetInfo ? "\n素材:与线上一致" + (assetInfo.added.length ? "(另有 " + assetInfo.added.length + " 个未下载,可用「下载离线资源」补齐)" : "") : "")
+					);
 				} catch (e) {
 					console.error("检查更新失败:", e);
 					alert("检查更新失败:" + (e && e.message ? e.message : e));

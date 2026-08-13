@@ -173,6 +173,33 @@ console.log("生成 PWA 资源清单");
 	await fs.writeFile("dist/pwa-all-assets.json", JSON.stringify(heavy.sort()));
 	console.log(`  核心预缓存清单: ${coreList.length} 文件`);
 	console.log(`  可下载资源清单: ${heavy.length} 文件`);
+
+	// —— 内容哈希清单:让客户端"不下载就知道哪些素材变了" ——
+	// 【为什么必须有它】素材存在 IndexedDB 里,键是 pathname。改了图但路径不变时,
+	// 下载器的 `pending = all.filter(url => !cachedSet.has(pathOf(url)))` 判定"已有"→ 跳过,
+	// 于是永远读旧字节;而记录里只存 { buf, mime, len },没有 ETag,发不出 If-None-Match,
+	// 所谓"校验"就退化成把字节整个重下。代码没这问题:换版时 install 用 cache:"reload"
+	// 整版重下核心清单,那条路绕开一切缓存。素材不在那条路上。
+	// 【为什么比清单而不是逐个问服务器】1.4 万个素材逐个条件请求是 1.4 万次往返;
+	// 而哈希清单一次下完(约 600KB,CF 会 gzip),diff 出来就是精确的变更集。
+	// 【为什么连代码文件也一起算】客户端要用自己的 isCodeAsset 过滤,而那个判据
+	// 在下载器和 pwa-sw.js 里各有一份、必须严格一致 —— 在构建里再抄第三份只会多一处走样点。
+	// 全算一遍成本一样(都是读一遍 dist),把过滤留给客户端。
+	{
+		const { createHash } = await import("node:crypto");
+		const hashes: Record<string, string> = {};
+		for (const rel of new Set([...coreList, ...heavy])) {
+			const abs = path.join("dist", rel.replace(/^\.\//, ""));
+			if (!existsSync(abs)) continue;
+			const buf = await fs.readFile(abs);
+			// 【取前 16 位十六进制 = 64 bit】1.4 万个文件下碰撞概率约 1.4e4^2 / 2^65 ≈ 5e-12,
+			// 可忽略;而全长 64 字符会把清单撑到 1.5MB。
+			hashes[rel] = createHash("sha256").update(buf).digest("hex").slice(0, 16);
+		}
+		await fs.writeFile("dist/pwa-asset-hashes.json", JSON.stringify(hashes));
+		const bytes = (await fs.stat("dist/pwa-asset-hashes.json")).size;
+		console.log(`  内容哈希清单: ${Object.keys(hashes).length} 文件 (${(bytes / 1024).toFixed(0)}KB)`);
+	}
 }
 
 // 写出构建版本戳:pwa-version.json 给界面显示,同时把戳替换进 pwa-sw.js。
@@ -195,7 +222,7 @@ console.log("生成 PWA 资源清单");
 	// 于是 classic 版直接用,ESM 版在末尾补一行 export —— 逻辑只有一处,不会两边走样。
 	const dbSource = await fs.readFile("apps/core/pwa-asset-db.js", "utf8");
 	await fs.writeFile("dist/pwa-asset-db.js", dbSource);
-	const dbExports = ["openAssetDB", "readAsset", "putAsset", "putAssets", "getAssetKeys", "countAssets", "pruneAssets", "guessMime"];
+	const dbExports = ["openAssetDB", "readAsset", "putAsset", "putAssets", "getAssetKeys", "countAssets", "pruneAssets", "guessMime", "getBaseline", "saveBaseline", "computeBaseline"];
 	for (const name of dbExports) {
 		if (!new RegExp(`function ${name}\\b`).test(dbSource)) {
 			throw new Error(`pwa-asset-db.js 里找不到 ${name}——ESM 版会导出一个不存在的名字,页面侧 import 直接报错`);

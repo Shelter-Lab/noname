@@ -183,21 +183,100 @@ async function putAssets(items) {
 	});
 }
 
+// —— 基线:本地每个素材的内容哈希 ——
+// 【它解决什么】素材键是 pathname,改了内容但路径不变时下载器判定"已有"就跳过,于是永远读旧字节
+// (记录里没 ETag,发不出 If-None-Match,"校验"只能整个重下)。有了基线就能和构建产出的
+// pwa-asset-hashes.json 逐条比对,精确算出变更集,一次 600KB 的清单下载换掉 1.4 万次往返。
+// 【为什么存成一条记录而不是每条素材加个字段】IDB 取一条会把整条(含 buf)反序列化出来,
+// 没法只读某个字段 —— 那样"读全部哈希"就等于把 1.16GB 素材全读一遍。存成单条映射则是 O(1)。
+// 【为什么必须记"本地实际有什么"而不是直接存服务端清单】直接存服务端那份等于替 IDB 撒谎:
+// 本地明明是旧字节,基线却声称与线上一致,之后永远 diff 不出差异。
+const BASELINE_KEY = "__asset_baseline__";
+// 保留键不是素材,必须从 keys/count/prune 里排除,否则会被当成"清单外的旧素材"删掉
+const RESERVED_KEYS = new Set([BASELINE_KEY]);
+
+/** 读基线 —— 返回 { path: hash } 映射;没有则 null */
+async function getBaseline() {
+	try {
+		const db = await openAssetDB();
+		const rec = await req(db.transaction(STORE, "readonly").objectStore(STORE).get(BASELINE_KEY));
+		return rec && rec.map ? rec.map : null;
+	} catch {
+		return null;
+	}
+}
+
+/** 写基线(整体覆盖) */
+async function saveBaseline(map) {
+	const db = await openAssetDB();
+	const tx = db.transaction(STORE, "readwrite");
+	tx.objectStore(STORE).put({ map }, BASELINE_KEY);
+	return new Promise((resolve, reject) => {
+		tx.oncomplete = () => resolve(true);
+		tx.onerror = tx.onabort = () => reject(tx.error || new Error("基线写入失败"));
+	});
+}
+
+/**
+ * 不联网地算出本地基线:遍历所有素材,对字节做 SHA-256 取前 16 位。
+ * 【为什么能对上构建时的哈希】存进来的就是 CF 上的原始字节 —— 下载器用的是
+ * `await r.arrayBuffer()`,SW 那条路只在 resp.redirected 时重建 Response 且 body 原样搬,
+ * 两处都不改字节。所以本地算的和构建时算的是同一个输入。
+ * 【为什么用游标而不是 getAll】getAll 会把全部素材(可达 1.16GB)一次性装进内存;
+ * 游标一条一条来,处理完即可回收,峰值只有一条。
+ * @param {(done:number)=>void} [onProgress] 每处理 200 条回报一次
+ * @returns {Promise<Record<string,string>>}
+ */
+async function computeBaseline(onProgress) {
+	const db = await openAssetDB();
+	// 先只取键(getAllKeys 不读值,很轻),再分批取值 —— 这是内存安全的关键。
+	// 【为什么不能用游标一把撸】cursor.continue() 必须在 onsuccess 里同步调用,不能先 await
+	// 哈希算完再推进(事务会在空转时自动提交)。若同步推到底、把哈希排成 Promise 链慢慢算,
+	// 那 1.4 万个 buffer(可达 1.16GB)会被闭包同时按住 —— 直接 OOM。
+	// 分批则峰值只有 BATCH 条,且每批一个短事务,不会长期占着事务。
+	const allKeys = await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
+	const keys = allKeys.filter(k => !RESERVED_KEYS.has(k));
+	const map = {};
+	const BATCH = 40;
+	for (let i = 0; i < keys.length; i += BATCH) {
+		const slice = keys.slice(i, i + BATCH);
+		const tx = db.transaction(STORE, "readonly");
+		const store = tx.objectStore(STORE);
+		const recs = await Promise.all(slice.map(k => req(store.get(k)).catch(() => null)));
+		for (let j = 0; j < slice.length; j++) {
+			const buf = recs[j] && recs[j].buf;
+			if (!buf) {
+				continue;
+			}
+			const digest = await crypto.subtle.digest("SHA-256", buf);
+			map[slice[j]] = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+		}
+		// recs 这一批出了作用域即可回收
+		if (onProgress) {
+			onProgress(Math.min(i + BATCH, keys.length), keys.length);
+		}
+	}
+	return map;
+}
+
 /** 库里已有哪些 pathname —— 用 getAllKeys 一次取回,别逐条 get 探测 */
 async function getAssetKeys() {
 	try {
 		const db = await openAssetDB();
-		return new Set(await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys()));
+		const keys = await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
+		return new Set(keys.filter(k => !RESERVED_KEYS.has(k)));
 	} catch {
 		return new Set();
 	}
 }
 
-/** 库里有多少条 */
+/** 库里有多少条(不含保留键) */
 async function countAssets() {
 	try {
 		const db = await openAssetDB();
-		return await req(db.transaction(STORE, "readonly").objectStore(STORE).count());
+		const n = await req(db.transaction(STORE, "readonly").objectStore(STORE).count());
+		const keys = await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
+		return n - keys.filter(k => RESERVED_KEYS.has(k)).length;
 	} catch {
 		return 0;
 	}
@@ -208,7 +287,9 @@ async function pruneAssets(validPathSet) {
 	try {
 		const db = await openAssetDB();
 		const keys = await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
-		const dead = keys.filter(k => !validPathSet.has(k));
+		// 【保留键必须排除】基线不在资源清单里,不排除就会被当成"清单外的旧素材"每次都删掉,
+		// 于是基线永远建不起来、每次检查更新都要重算一遍。
+		const dead = keys.filter(k => !validPathSet.has(k) && !RESERVED_KEYS.has(k));
 		if (!dead.length) return 0;
 		const tx = db.transaction(STORE, "readwrite");
 		const store = tx.objectStore(STORE);

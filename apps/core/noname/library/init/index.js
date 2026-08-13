@@ -20,11 +20,20 @@ export class LibInit {
 	 * - 实时在按钮上显示进度;再次点击可暂停
 	 * - 捕获配额超限(iOS 有上限),优雅停止并告知已缓存量
 	 * @param {HTMLElement} button 触发的按钮元素(用于显示进度)
+	 * @param {{ onlyList?: string[], silent?: boolean }} [options] onlyList:只下这些 URL 且**强制重下**
+	 *   (用于「检查更新」比对内容哈希后精确补差异);silent:不弹结果框,由调用方自己报
+	 * @returns {Promise<{ done:number, total:number, failed:string[], aborted:boolean, quota:boolean }|undefined>}
 	 */
-	async downloadOfflineAssets(button) {
+	async downloadOfflineAssets(button, options) {
 		const setText = text => {
 			if (button) button.innerHTML = `<span>${text}</span>`;
 		};
+		// 【forced 模式的两个必须】
+		//  1. 不能按 cachedSet 过滤 —— 这些文件本来就在库里,要的正是"覆盖掉旧字节";
+		//  2. **绝对不能 prune** —— prune 以传入清单为唯一事实源删掉清单外的条目,
+		//     而这里传的是几十个差异文件,一 prune 就把另外一万多个素材全删了。
+		const forced = options && Array.isArray(options.onlyList) ? options.onlyList.slice() : null;
+		const silent = Boolean(options && options.silent);
 
 		// 已在下载 → 再次点击视为暂停
 		if (lib.init._offlineDownloading) {
@@ -46,12 +55,17 @@ export class LibInit {
 		try {
 			// 合并核心清单 + 全量清单一起核对,确保核心里的启动必需文件(jit-test.ts 等)
 			// 若缺失也能被"补课"下载,而不只是下大素材。
-			const [coreResp, allResp] = await Promise.all([fetch("./pwa-core-assets.json", { cache: "no-cache" }), fetch("./pwa-all-assets.json", { cache: "no-cache" })]);
-			if (!allResp.ok) throw new Error("资源清单获取失败 " + allResp.status);
-			const coreList = coreResp.ok ? await coreResp.json() : [];
-			const allList = await allResp.json();
 			/** @type {string[]} */
-			const all = [...new Set([...coreList, ...allList])];
+			let all;
+			if (forced) {
+				all = forced;
+			} else {
+				const [coreResp, allResp] = await Promise.all([fetch("./pwa-core-assets.json", { cache: "no-cache" }), fetch("./pwa-all-assets.json", { cache: "no-cache" })]);
+				if (!allResp.ok) throw new Error("资源清单获取失败 " + allResp.status);
+				const coreList = coreResp.ok ? await coreResp.json() : [];
+				const allList = await allResp.json();
+				all = [...new Set([...coreList, ...allList])];
+			}
 			// 【代码进 Cache Storage,素材进 IndexedDB】这是治「iOS 冷启动 15.8 秒」的关键改动,
 			// 详见 TROUBLESHOOTING 病因七与 pwa-asset-db.js 头部。要点:WebKit 的 caches.open() 会扫
 			// 该 origin 下**每个桶的每一条 record**,成本正比于条目数、与字节数无关,且账按 origin 算
@@ -84,27 +98,27 @@ export class LibInit {
 			// 【两个仓库的已有 key 要合起来算】否则代码那 700 多个或素材会被判成「未缓存」每次重下。
 			// 用 keys()/getAllKeys() 一次性取回做 Set 再比对 —— 避免逐个探测 1.4 万次把主线程搞崩
 			// (这是历史上「下载完再点会白屏」的成因,别改回逐条 match)。
-			const cachedSet = new Set([...(await codeCache.keys())].map(r => new URL(r.url).pathname));
-			if (db) {
+			const cachedSet = forced ? new Set() : new Set([...(await codeCache.keys())].map(r => new URL(r.url).pathname));
+			if (db && !forced) {
 				for (const k of await db.getAssetKeys()) cachedSet.add(k);
 				// 【顺手清掉清单里已不存在的旧素材】改名/下架过的历史残留没有任何代码会清理,而它们
 				// 照样占条目数(实测缓存里比清单多约 6000 条)。以最新构建产物为唯一事实源。
 				const pruned = await db.pruneAssets(new Set(all.map(pathOf)));
 				if (pruned) console.log(`[素材库] 清掉 ${pruned} 条清单外的旧素材`);
-			} else {
+			} else if (!forced) {
 				for (const r of await legacyAssetCache.keys()) cachedSet.add(new URL(r.url).pathname);
 			}
-			const pending = all.filter(url => !cachedSet.has(pathOf(url)));
+			const pending = forced ? all.slice() : all.filter(url => !cachedSet.has(pathOf(url)));
 			const total = all.length;
 			let done = total - pending.length; // 已缓存的算作已完成
 			let quotaExceeded = false;
 
 			// 核对后已全部缓存 → 秒提示,不走下载循环
 			if (pending.length === 0) {
-				setText("已下载离线资源");
-				alert(`离线资源已全部缓存(${total}/${total}),断网也能玩。`);
+				setText(forced ? "下载离线资源" : "已下载离线资源");
+				if (!silent) alert(`离线资源已全部缓存(${total}/${total}),断网也能玩。`);
 				lib.init._offlineDownloading = false;
-				return;
+				return { done: total, total, failed: [], aborted: false, quota: false };
 			}
 
 			setText(`下载中 ${done}/${total}`);
@@ -181,6 +195,11 @@ export class LibInit {
 				}
 			}
 
+			const outcome = { done, total, failed: writeFailed.slice(), aborted: Boolean(lib.init._offlineDownloadAbort), quota: quotaExceeded };
+			if (silent) {
+				setText(forced ? "下载离线资源" : done >= total ? "已下载离线资源" : "下载离线资源");
+				return outcome;
+			}
 			if (quotaExceeded) {
 				alert(`已达设备缓存容量上限,离线资源部分缓存(${done}/${total})。\niOS 对网页缓存有容量限制,已缓存内容可离线使用。`);
 				setText("下载离线资源");
@@ -196,6 +215,7 @@ export class LibInit {
 				alert(`离线资源下载完成(${done}/${total})!断网也能玩了。`);
 				setText("已下载离线资源");
 			}
+			return outcome;
 		} catch (e) {
 			console.error("下载离线资源失败:", e);
 			alert("下载离线资源失败:" + (e instanceof Error ? e.message : String(e)));
