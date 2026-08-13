@@ -4985,10 +4985,22 @@ ${e instanceof Error ? e.stack : String(e)}`);
 			}
 			_status.reloading = true;
 		}
-		if (_status.video && !_status.replayvideo) {
-			localStorage.removeItem(lib.configprefix + "playbackmode");
+		// 【这两笔存储写入必须容错】iOS standalone PWA 里 localStorage 会在运行期变成 null
+		// （报错原文 "null is not an object (evaluating 'localStorage.setItem')"），
+		// index.html 的兜底只在启动那一刻探测一次，探测通过后中途失效它就管不到了。
+		// 而上面已经把 _status.reloading 置为 true 了 —— 一旦这里抛出，
+		// window.location.reload() 走不到，且后续每次点「重来」都被那把锁挡回去，
+		// 按钮从此彻底失灵（实测症状："点多了重来就失效了"）。
+		// 这两笔都只是"下次启动少个提示/少跳过闪屏"的锦上添花，丢了不影响重载本身，
+		// 所以宁可静默失败也要保证 reload 一定执行。
+		try {
+			if (_status.video && !_status.replayvideo) {
+				localStorage.removeItem(lib.configprefix + "playbackmode");
+			}
+			localStorage.setItem("show_splash_off", true);
+		} catch (e) {
+			console.warn("game.reload: 存储不可用，跳过 show_splash_off/playbackmode 写入", e);
 		}
-		localStorage.setItem("show_splash_off", true);
 		if (lib.status.reload) {
 			_status.waitingToReload = true;
 		} else {

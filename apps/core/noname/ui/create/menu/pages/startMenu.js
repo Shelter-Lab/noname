@@ -82,7 +82,14 @@ export const startMenu = function (connectMenu) {
 						game.send("server", "create", game.onlineKey, get.connectNickname(), lib.config.connect_avatar);
 					}
 				} else {
-					localStorage.setItem(lib.configprefix + "directstart", true);
+					// directstart 只是"下次启动直接进这个模式"的快捷标记，写不进去无所谓；
+					// 但 iOS standalone PWA 里 localStorage 会在运行期变成 null，抛出来会把整个
+					// 「启」按钮打断（点了没反应或弹报错）。详见 game.reload() 里的同类注释。
+					try {
+						localStorage.setItem(lib.configprefix + "directstart", true);
+					} catch (e) {
+						console.warn("startMenu: 存储不可用，跳过 directstart 标记", e);
+					}
 					game.saveConfig("directstartmode", active.mode);
 					game.saveConfig("mode", "connect");
 					ui.exitroom = ui.create.system(
@@ -99,7 +106,12 @@ export const startMenu = function (connectMenu) {
 				clickContainer.call(cacheMenuContainer, connectMenu);
 			} else {
 				game.saveConfig("mode", active.mode);
-				localStorage.setItem(lib.configprefix + "directstart", true);
+				// 同上：标记写不进去也要保证 game.reload() 一定执行，否则单机的「启」点了没反应
+				try {
+					localStorage.setItem(lib.configprefix + "directstart", true);
+				} catch (e) {
+					console.warn("startMenu: 存储不可用，跳过 directstart 标记", e);
+				}
 				game.reload();
 			}
 		}
