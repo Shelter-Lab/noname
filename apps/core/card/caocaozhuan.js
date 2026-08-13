@@ -190,17 +190,40 @@ export default {
 
 		/**
 		 * 镜铠 —— 原作"防御远距攻击"（大幅克制弓箭等远程物理）。
-		 * 【为什么判据是攻击范围而不是"弓"】卡面右上角那个字（qilin_bg:"弓"）只是显示用，
-		 * 本体只有麒麟弓/诸葛连弩两张标了它，靠单字匹配以后加卡必漏。改用"来源装备区里
-		 * 有攻击范围 ≥4 的武器"——弓类武器的共性就是远程，判据客观、新卡自动生效。
-		 * 门槛取 4 而非 3：≥4 只圈住麒麟弓(5)、方天画戟(4)、朱雀羽扇(4) 三把；
-		 * ≥3 会把贯石斧、丈八蛇矛等一批 attackFrom:-2 的近战武器也算进来，太宽。
+		 * 判据是"来源与你的实际距离 >= 3"（见 ccz_jingkai_skill 处的完整说明）。
 		 */
 		ccz_jingkai: {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip2",
-			ai: { basic: { equipValue: 5 } },
+			ai: {
+				/**
+				 * 【本包唯一需要动态估值的一件】其余 24 件的价值都不随场面崩塌:
+				 * 常驻增减伤(玉玺、黄金铠…)装了就有用;坐骑的距离修正永远生效;
+				 * 主动技能类(四宝玉、青囊书…)的场面判断在各自的 ai.result 里做
+				 * (如白虎用 get.recoverEffect,队友满血时自动返回 0)。
+				 * 而镜铠是**锁定技、没有 ai.result** —— AI 判断它价值的唯一入口就是这里。
+				 *
+				 * 【为什么它会真正归零】8 人局座位距离是 1 2 3 4 3 2 1,能挡 3 个人;
+				 * 但残局只剩 3 人时所有人距离都是 1,一次都触发不了 —— 而座位关系是固定的,
+				 * 不像血量会波动。静态 ev5 会让 AI 在残局照旧抢它、保它,那是可见的错误行为。
+				 * (对比凤凰羽衣:满血时只是"这一回合的回血浪费了",下回合受伤照样生效,
+				 * 属于暂时闲置而非结构性归零,故不必动态。)
+				 *
+				 * 【为什么不改回"克制攻击范围>=3的武器"判据】那样残局不归零、也不用动态 ev,
+				 * 但会得出荒谬结论:骑赤兔冲到你面前砍你的人,因为手里拿的是长兵器而被镜铠
+				 * 挡住 —— 那明明是近战。"距离"判据已经把马算进去了,分得清"远处射来"
+				 * 和"冲到面前砍"。规则合理性优先,动态估值只是为此付的代价。
+				 */
+				equipValue(card, player) {
+					const far = game.filterPlayer(t => t !== player && get.attitude(player, t) < 0 && get.distance(t, player) >= 3).length;
+					if (!far) {
+						return 0; // 没有敌人在射程外 → 此刻这件装备一点用都没有
+					}
+					return Math.min(8, 3 + far * 2);
+				},
+				basic: { equipValue: 5 },
+			},
 			skills: ["ccz_jingkai_skill"],
 		},
 
@@ -1088,17 +1111,17 @@ export default {
 
 		ccz_lvbuzhigong: "吕布之弓",
 		ccz_lvbuzhigong_bg: "弓",
-		ccz_lvbuzhigong_info: "锁定技，当你使用【杀】造成伤害后，目标角色本回合与其下个回合内不能使用【杀】。",
+		ccz_lvbuzhigong_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色直到其下个回合结束前不能使用【杀】。",
 		ccz_lvbuzhigong_skill: "吕布之弓",
-		ccz_lvbuzhigong_skill_info: "锁定技，当你使用【杀】造成伤害后，目标角色本回合与其下个回合内不能使用【杀】。",
+		ccz_lvbuzhigong_skill_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色直到其下个回合结束前不能使用【杀】。",
 		ccz_mabi: "麻痹",
 		ccz_mabi_info: "你不能使用【杀】。",
 
 		ccz_ligzhigong: "李广之弓",
 		ccz_ligzhigong_bg: "弓",
-		ccz_ligzhigong_info: "锁定技，当你使用【杀】造成伤害后，目标角色本回合与其下个回合内不能发动技能（装备技能除外）。",
+		ccz_ligzhigong_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色直到其下个回合结束前不能发动技能（装备技能除外）。",
 		ccz_ligzhigong_skill: "李广之弓",
-		ccz_ligzhigong_skill_info: "锁定技，当你使用【杀】造成伤害后，目标角色本回合与其下个回合内不能发动技能（装备技能除外）。",
+		ccz_ligzhigong_skill_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色直到其下个回合结束前不能发动技能（装备技能除外）。",
 		ccz_jinzhou: "禁咒",
 		ccz_jinzhou_info: "你不能发动技能（装备技能除外）。",
 
@@ -1122,20 +1145,20 @@ export default {
 
 		ccz_yangyoujizhigong: "养由基之弓",
 		ccz_yangyoujizhigong_bg: "弓",
-		ccz_yangyoujizhigong_info: "你可以将两张相同花色的手牌当【万箭齐发】使用。",
+		ccz_yangyoujizhigong_info: "出牌阶段，你可以将两张相同花色的手牌当【万箭齐发】使用。",
 		ccz_luanji: "乱击",
-		ccz_luanji_info: "你可以将两张相同花色的手牌当【万箭齐发】使用。",
+		ccz_luanji_info: "出牌阶段，你可以将两张相同花色的手牌当【万箭齐发】使用。",
 
 		// 防具
 		ccz_jingkai: "镜铠",
 		ccz_jingkai_bg: "镜",
-		ccz_jingkai_info: "锁定技，当你受到【杀】造成的伤害时，若伤害来源的装备区里有攻击范围不小于4的武器牌，此伤害无效。",
+		ccz_jingkai_info: "锁定技，当你受到【杀】造成的伤害时，若伤害来源与你的距离不小于3，此伤害无效。",
 		ccz_jingkai_skill: "镜铠",
-		ccz_jingkai_skill_info: "锁定技，当你受到【杀】造成的伤害时，若伤害来源的装备区里有攻击范围不小于4的武器牌，此伤害无效。",
+		ccz_jingkai_skill_info: "锁定技，当你受到【杀】造成的伤害时，若伤害来源与你的距离不小于3，此伤害无效。",
 
 		ccz_lianhuankai: "连环铠",
 		ccz_lianhuankai_bg: "环",
-		ccz_lianhuankai_info: "锁定技，每回合你第二次及以后受到【杀】造成的伤害时，此伤害无效。（非【杀】造成的伤害不受影响）",
+		ccz_lianhuankai_info: "锁定技，每回合你只会受到一次【杀】造成的伤害，本回合内之后的【杀】伤害均无效。（非【杀】造成的伤害不受影响）",
 		ccz_lianhuankai_skill: "连环铠",
 		ccz_lianhuankai_skill_info: "锁定技，每回合你第二次及以后受到【杀】造成的伤害时，此伤害无效。",
 
@@ -1147,9 +1170,9 @@ export default {
 
 		ccz_baiyinkai: "白银铠",
 		ccz_baiyinkai_bg: "银",
-		ccz_baiyinkai_info: "锁定技，非因卡牌造成的伤害（技能等）对你无效。",
+		ccz_baiyinkai_info: "锁定技，不由卡牌造成的伤害（武将技能、毒等）对你无效。",
 		ccz_baiyinkai_skill: "白银铠",
-		ccz_baiyinkai_skill_info: "锁定技，非因卡牌造成的伤害（技能等）对你无效。",
+		ccz_baiyinkai_skill_info: "锁定技，不由卡牌造成的伤害（武将技能、毒等）对你无效。",
 
 		ccz_longlinkai: "龙鳞铠",
 		ccz_longlinkai_bg: "鳞",
@@ -1232,9 +1255,9 @@ export default {
 
 		ccz_zhuquebaoyu: "朱雀宝玉",
 		ccz_zhuquebaoyu_bg: "雀",
-		ccz_zhuquebaoyu_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火焰伤害。",
+		ccz_zhuquebaoyu_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火焰伤害（你自己不受影响，故目标为你的邻座时只有两名角色受到伤害）。",
 		ccz_zhuquebaoyu_skill: "朱雀宝玉",
-		ccz_zhuquebaoyu_skill_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火焰伤害。",
+		ccz_zhuquebaoyu_skill_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火焰伤害（你自己不受影响，故目标为你的邻座时只有两名角色受到伤害）。",
 
 		ccz_baihubaoyu: "白虎宝玉",
 		ccz_baihubaoyu_bg: "虎",
@@ -1244,9 +1267,9 @@ export default {
 
 		ccz_xuanwubaoyu: "玄武宝玉",
 		ccz_xuanwubaoyu_bg: "武",
-		ccz_xuanwubaoyu_info: "当你对一名其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定：若点数为1~4，其本回合与下回合内不能使用【杀】；5~8，不能发动技能；9~12，不能使用锦囊牌；13则无效果。",
+		ccz_xuanwubaoyu_info: "当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：点数1~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~12，不能使用锦囊牌；13则无效果。",
 		ccz_xuanwubaoyu_skill: "玄武宝玉",
-		ccz_xuanwubaoyu_skill_info: "当你对一名其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定：若点数为1~4，其本回合与下回合内不能使用【杀】；5~8，不能发动技能；9~12，不能使用锦囊牌；13则无效果。",
+		ccz_xuanwubaoyu_skill_info: "当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：点数1~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~12，不能使用锦囊牌；13则无效果。",
 		ccz_hunluan: "混乱",
 		ccz_hunluan_info: "你不能使用锦囊牌。",
 
