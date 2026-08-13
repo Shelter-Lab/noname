@@ -605,7 +605,11 @@ self.addEventListener("fetch", event => {
 	// 只在后台更新、下次打开才生效。下载器虽写了 `cache:"no-cache"`,但那只约束浏览器 HTTP 缓存,
 	// 请求照样进 SW 被 Cache Storage 拦下 —— SW 里 no-cache 仅用于豁免超时(missTimeoutMs)。
 	// 后果不只是数字难看:按旧清单下载会漏掉新增素材(新补的立绘照样是剪影)。
-	if (url.pathname.endsWith("/pwa-version.json") || url.pathname.endsWith("/pwa-all-assets.json") || url.pathname.endsWith("/pwa-core-assets.json")) {
+	// 【pwa-asset-hashes.json 同理,而且漏了它更隐蔽】它是「素材有没有改过」的唯一判据
+	// (内容哈希清单,见 build.ts)。若走 Cache-First 拿到上一版清单,diff 出来恒为空 ——
+	// 界面报「素材与线上一致」而实际是旧图,一句错都不报;基线还会照这份旧清单写进去,
+	// 连下次也一起错。它必须和另外两份清单一样 Network-First。
+	if (url.pathname.endsWith("/pwa-version.json") || url.pathname.endsWith("/pwa-all-assets.json") || url.pathname.endsWith("/pwa-core-assets.json") || url.pathname.endsWith("/pwa-asset-hashes.json")) {
 		event.respondWith(
 			(async () => {
 				// 清单/版本戳是 .json,isCodeAsset 判它为代码 → 放代码桶,与读取端一致。
@@ -638,7 +642,8 @@ self.addEventListener("fetch", event => {
 					}
 					// 离线且无缓存:兜底体必须与消费方期待的类型一致 ——
 					// 清单是数组(下载器 `[...new Set([...coreList, ...allList])]` 展开,给对象会抛 not iterable),
-					// pwa-version.json 是对象。
+					// pwa-version.json 与 pwa-asset-hashes.json 都是对象(后者是 {路径: 哈希} 映射,
+					// 名字以 hashes.json 结尾故落在 "{}" 这侧,恰好对 —— 别改成按 ".json" 一刀切)。
 					const empty = url.pathname.endsWith("assets.json") ? "[]" : "{}";
 					return new Response(empty, { status: 200, headers: { "Content-Type": "application/json" } });
 				}
