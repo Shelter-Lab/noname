@@ -2,6 +2,7 @@ import { lib, game, ui, get, ai, _status } from "noname";
 
 import skill from "./config/skill.js";
 import translate from "./config/translate.js";
+import { rawAttitude, logAi } from "./config/ai.js";
 
 export const type = "mode";
 
@@ -411,7 +412,10 @@ export default () => ({
 	start: [
 		async (event, trigger, player) => {
 			if (!_status.connectMode) {
-				// 本模式六个身份一个 AI 决策都没写，单机必然卡死在夜间刀人那步。
+				// 单机还没通：分身份和选将走的是 chooseCharacterOL → game.me.chooseButtonOL，
+				// 加上 game.randomMapOL 依赖 lib.node.clients / lib.configOL，这套全是联机专用的，
+				// 单机下这两样都没有，开局就断。要解锁得另写一条单机的分身份+选将路径
+				// （AI 已经有了，见 config/ai.js，不再是拦路的那块）。
 				// 单机菜单里已经摆了「仅联机可玩」的说明（library/index.js 的 langrensha_onlyol_notice），
 				// 这里是兜底：万一有人绕过菜单直接进来（老存档的 mode 记着 langrensha、
 				// 或 localStorage 的 directstart 残留），给一个能看懂的弹窗而不是卡死。
@@ -428,8 +432,8 @@ export default () => ({
 				await new Promise(resolve => {
 					const dialog = ui.create.dialog(
 						`<div class="text center"><b>狼人杀仅联机模式可玩</b></div>` +
-							`<div class="text">本模式的六个身份都没有 AI，单机开局会卡在夜间刀人这步。</div>` +
-							`<div class="text">请返回主菜单点「联机」，创建房间或用房间号加入，在房间内选择「狼人杀」。需要 8 或 10 名真人。</div>`,
+							`<div class="text">本模式的分身份和选将流程只有联机版，单机开局会中断。</div>` +
+							`<div class="text">请返回主菜单点「联机」，创建房间或用房间号加入，在房间内选择「狼人杀」。房间人数设 8 或 10，真人不够的座位由 AI 托管。</div>`,
 						"hidden"
 					);
 					dialog.open();
@@ -939,6 +943,9 @@ export default () => ({
 
 	element: {
 		player: {
+			// 行为暴露度的更新入口，实现见 config/ai.js。core 只做
+			// `typeof this.logAi == "function"` 判断，本体没有默认实现，各模式自己写一份
+			logAi,
 			// 狼人发言：客户端 → 主机 → 转发给全部存活狼人
 			chatTeamOnline(str) {
 				if (get.is.banWords(str) || !this.isLang()) {
@@ -1251,13 +1258,10 @@ export default () => ({
 		campPopulation(camp, elobrate) {
 			return camp == undefined ? game.players.length + game.dead.length : game.players.filter(current => current.getCamp(elobrate) == camp).length;
 		},
-		// 狼人杀没有 AI，态度只用来给"随机选一个目标"排序
-		attitude(from, to) {
-			if (from === to) {
-				return 10;
-			}
-			return -1;
-		},
+		// 态度算法见 config/ai.js。只实现 rawAttitude 而不覆盖 attitude：
+		// 外面那层 get.attitude（get/index.js:6547）还要处理 isMad 反转和
+		// modAttitudeFrom/To，覆盖掉就全丢了
+		rawAttitude,
 		// 查验结果：隐狼查出来是好人
 		insightResult(from, to) {
 			const toCamp = to.getCamp();

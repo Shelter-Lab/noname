@@ -1,5 +1,7 @@
 import { game, ui, _status, ai, lib, get } from "noname";
 
+import { markGuessedGood, markInsight } from "./ai.js";
+
 // 狼人杀的两条"规则技"。技能名以下划线开头 → game.finishSkill 会自动 addGlobalSkill，
 // 无需给每个角色手动加技能；ruleSkill 只是把优先级压低(_priority -= 75)，让它排在角色技后面。
 export default {
@@ -31,7 +33,8 @@ export default {
 						next = current.chooseTarget(get.prompt2("狼刀"));
 						next.set("ai", target => {
 							const player = get.player();
-							return -get.attitude(player, target);
+							// 越恨越优先。狼刀伤害同目标会累加，所以同等仇恨下先补残血的，集火比分散快
+							return -get.attitude(player, target) + (target.hp <= 2 ? 1 : 0) - target.hp * 0.1;
 						});
 						next.set("prompt2", "选择一名角色，使其流失" + (current.swState.langdao || 1) + "点体力。（不触发技能）");
 						next.set("_global_waiting", true);
@@ -49,7 +52,8 @@ export default {
 								],
 							],
 							filterButton(button) {
-								if (!get.event("canuse")) {
+								// get.event("xxx") 是废弃写法，每次调用都会打一条 console 警告（compatible.js:191）
+								if (!get.event().canuse) {
 									return false;
 								}
 								if (button.link == "revive") {
@@ -81,10 +85,30 @@ export default {
 								return 0;
 							},
 							ai1(button) {
-								return Math.random();
+								const player = get.player();
+								if (button.link == "revive") {
+									// 复活回来是 3 体力 + 3 张牌，很值，但只救自己真信得过的人
+									let best = 0;
+									for (const current of game.dead) {
+										best = Math.max(best, get.attitude(player, current));
+									}
+									return best - 2;
+								}
+								// 毒是一局一次的一发子弹，只对已经咬定的狼放
+								let worst = 0;
+								for (const current of game.players) {
+									if (current == player) {
+										continue;
+									}
+									worst = Math.min(worst, get.attitude(player, current));
+								}
+								return -worst - 2;
 							},
 							ai2(target) {
-								return Math.random();
+								const player = get.player();
+								// 上面的 selectTarget 已按选中的按钮把 filterTarget 切成"只能选死人/只能选活人"，
+								// 这里跟着 deadTarget 取相反方向：救人挑最信的，下毒挑最恨的
+								return get.event().deadTarget ? get.attitude(player, target) : -get.attitude(player, target);
 							},
 						});
 						next.set("canuse", !current.swState.nvwu && game.roundNumber > 1);
@@ -97,7 +121,10 @@ export default {
 						});
 						next.set("ai", target => {
 							const player = get.player();
-							return -get.attitude(player, target);
+							// 查验没有代价，不该空过——chooseTarget 的 AI 在最高分 <=0 时会放弃
+							// （ai/basic.js:223），所以给个正基线，再按可疑度排序。
+							// 已经很信任的人反过来不值得占掉这次查验
+							return 3 - get.attitude(player, target);
 						});
 						next.set("_global_waiting", true);
 						break;
@@ -106,7 +133,9 @@ export default {
 							next = current.chooseTarget(get.prompt2("书以寄情"), lib.filter.notMe);
 							next.set("ai", target => {
 								const player = get.player();
-								return get.attitude(player, target);
+								// 认下偶像后自己就归平民阵营，而偶像死在自己手上直接判本局目标失败，
+								// 所以挑一个看着最像好人、又最耐活的
+								return get.attitude(player, target) + target.hp + target.countCards("h") / 2;
 							});
 							next.set("prompt2", "选择一名角色，使其成为你的偶像");
 							next.set("forced", true);
@@ -222,6 +251,9 @@ export default {
 				const now = langdao[0][i];
 				// 用 loseHp 而非 damage：狼刀不触发受伤类技能，_reason 供觉孤判定继承阵营
 				await now.loseHp(langdao[1][i]).set("_triggered", null).set("_reason", "lang");
+				// 被狼刀是公开可见的，而狼不会刀自己队友 → 全场推定他是好人。
+				// 这是 AI 唯一的破冰信息源：开局所有人 ai.shown 都是 0，没有这一笔态度会全场归零
+				markGuessedGood(now);
 			}
 			// 结算女巫
 			for (let i = 0; i < answer_result[0].length; i++) {
@@ -239,11 +271,15 @@ export default {
 						game.log(target, "因为", "#b女巫", "的", "#y神力", "复活了");
 						await target.reviveEvent(3);
 						await target.draw(3).set("_triggered", null).set("_reason", "nvwu");
+						// 复活是全场可见的，女巫不会救狼 → 同狼刀，推定他是好人
+						markGuessedGood(target);
 					} else if (result.links == "kill") {
 						if (!target.isIn()) {
 							continue;
 						}
 						await target.loseHp(3).set("_triggered", null).set("_reason", "nvwu");
+						// 毒杀不标记：掉体力的样子跟狼刀分不出来，而"女巫觉得他是狼"是女巫的私有判断，
+						// 标出去就等于把女巫的想法广播给全场 AI
 					}
 					game.broadcastAll(player => {
 						player.swState ??= {};
@@ -267,6 +303,9 @@ export default {
 					player.markAuto("sw_yvyanjiaInsight", [target]);
 					event.videoId = lib.status.videoId++;
 					const insightResult = get.insightResult(player, target);
+					// 只记在预言家自己的 player.ai 上（不进 swState，swState 会被 syncState 广播给全场）。
+					// 查出"狼"是铁证，查出"好人"只能算推定——隐狼的查验结果就是好人
+					markInsight(player, target, insightResult);
 					const send = (clientTarget, clientInsightResult, id) => {
 						var classList = clientTarget.classList,
 							nonStratagemInsightFlashing = classList.contains("flash-animation-iteration-count-infinite");
