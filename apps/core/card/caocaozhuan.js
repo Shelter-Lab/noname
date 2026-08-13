@@ -75,7 +75,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip1",
-			distance: { attackFrom: -3 },
+			distance: { attackFrom: -2 },
 			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_fangtianhuaji_skill"],
 		},
@@ -539,12 +539,14 @@ export default {
 			// clearTime：回合结束自动清掉"本回合已被此法指定过的人"，不用自己擦
 			clearTime: true,
 			filter(event, player) {
-				if (!event.card || event.card.name !== "sha" || !event.player?.isIn()) {
+				// 【排除自伤】若【杀】打到自己，event.player 就是自己，next/previous 会指向
+				// 你的邻座 —— 变成"自伤一下就白砍邻座一刀"。
+				if (!event.card || event.card.name !== "sha" || !event.player?.isIn() || event.player === player) {
 					return false;
 				}
 				// 上/下家里还有没被此法打过的，且自己有牌可弃
 				const done = player.getStorage("ccz_fangtianhuaji_used");
-				return [event.player.next, event.player.previous].some(t => t?.isIn() && t !== player && !done.includes(t) && player.canUse("sha", t, false)) && player.countCards("he");
+				return [event.player.next, event.player.previous].some(t => t?.isIn() && t !== player && !done.includes(t) && player.canUse("sha", t, false)) && player.countCards("h") > 0;
 			},
 			async cost(event, trigger, player) {
 				const done = player.getStorage("ccz_fangtianhuaji_used");
@@ -557,7 +559,7 @@ export default {
 			},
 			async content(event, trigger, player) {
 				const target = event.targets[0];
-				const { result } = await player.chooseToDiscard("he", true, `弃置一张牌，视为对${get.translation(target)}使用一张【杀】`);
+				const { result } = await player.chooseToDiscard("h", true, `弃置一张牌，视为对${get.translation(target)}使用一张【杀】`);
 				if (!result?.bool) {
 					return;
 				}
@@ -572,7 +574,9 @@ export default {
 			trigger: { source: "damageSource" },
 			forced: true,
 			filter(event, player) {
-				return event.card?.name === "sha" && event.player?.isIn();
+				// 【必须排除 event.player === player】source:"damageSource" 在你造成伤害时触发，
+				// 而【杀】打到自己也算（反伤类技能、或改变目标的效果）—— 不排除就会自己禁自己。
+				return event.card?.name === "sha" && event.player?.isIn() && event.player !== player;
 			},
 			async content(event, trigger, player) {
 				// addTempSkill 的第二参给 phaseAfter：从现在起到"目标下个回合结束"都禁用，
@@ -605,7 +609,8 @@ export default {
 			trigger: { source: "damageSource" },
 			forced: true,
 			filter(event, player) {
-				return event.card?.name === "sha" && event.player?.isIn();
+				// 同吕布之弓：排除"自己伤到自己"，否则会自己禁自己的技能
+				return event.card?.name === "sha" && event.player?.isIn() && event.player !== player;
 			},
 			async content(event, trigger, player) {
 				trigger.player.addTempSkill("ccz_jinzhou", { player: "phaseAfter" });
@@ -685,15 +690,15 @@ export default {
 				if (!armorValid(event, player)) {
 					return false;
 				}
-				// 来源装备区里有攻击范围 ≥4 的武器
-				return event.source.getCards("e", card => {
-					const info = get.info(card);
-					if (!info || info.subtype !== "equip1") {
-						return false;
-					}
-					const af = info.distance?.attackFrom;
-					return typeof af === "number" && 1 - af >= 4;
-				}).length > 0;
+				// 【判据是实际距离而不是对方装了什么武器】
+				// 原先遍历来源装备区找 attackFrom >= 3 的武器,那有个漏洞:靠 +1 马拉近、
+				// 或靠技能改距离打过来的,都躲过了检查。而 get.distance 是本体计算距离的
+				// 唯一入口,把马、技能、装备的影响全算进去了 —— 一行胜过一堆枚举。
+				// 【门槛为什么是 3】8 人局里其他 7 人的座位距离是 1 2 3 4 3 2 1:
+				//   >=2 免疫 5 人(71%) —— 全场只有上下家能打你,比本体任何防具都强,且装上即成立;
+				//   >=3 免疫 3 人(43%) —— 与仁王盾(挡黑杀约50%)、八卦阵(约40%)同档,
+				// 且攻方有明确突破手段(配 +1 马或范围>=3 的长兵器),不是没辙。
+				return get.distance(event.source, player) >= 3;
 			},
 			async content(event, trigger, player) {
 				trigger.cancel();
@@ -874,11 +879,11 @@ export default {
 				if (!event.card || event.card.name !== "sha" || !event.target?.isIn()) {
 					return false;
 				}
-				return player.countCards("he") > 0;
+				return player.countCards("h") > 0;
 			},
 			async cost(event, trigger, player) {
 				event.result = await player
-					.chooseToDiscard("he", get.prompt2("ccz_chixiaojian", trigger.target))
+					.chooseToDiscard("h", get.prompt2("ccz_chixiaojian", trigger.target))
 					.set("ai", card => {
 						// 目标是敌人才值得弃牌;弃的牌越便宜越好
 						const t = _status.event.getTrigger().target;
@@ -938,7 +943,9 @@ export default {
 			filterCard(card) {
 				return get.suit(card) === "diamond";
 			},
-			position: "he",
+			// 【只能弃手牌，不能弃装备区】"he" 会把装备区算进去 —— 而装备区里恰好有
+			// 这件宝玉本身，玩家能"弃掉朱雀宝玉来发动朱雀宝玉"。
+			position: "h",
 			check(card) {
 				return 8 - get.value(card);
 			},
@@ -980,11 +987,11 @@ export default {
 			filterCard(card) {
 				return get.suit(card) === "heart";
 			},
-			position: "he",
+			position: "h",
 			check(card) {
 				return 8 - get.value(card);
 			},
-			selectTarget: [1, 3],
+			selectTarget: [1, 2],
 			multitarget: true,
 			multiline: true,
 			filterTarget(card, player, target) {
@@ -1012,11 +1019,16 @@ export default {
 			equipSkill: true,
 			trigger: { source: "damageSource" },
 			filter(event, player) {
-				return event.player?.isIn() && player.countCards("he", card => get.suit(card) === "spade") > 0;
+				// 【必须排除 event.player === player】damageSource 在"你造成伤害"时触发，
+				// 而"你对自己造成伤害"（苦肉、崩坏这类）同样满足 —— 不排除就会给自己上 debuff。
+				if (!event.player?.isIn() || event.player === player) {
+					return false;
+				}
+				return player.countCards("h", card => get.suit(card) === "spade") > 0;
 			},
 			async cost(event, trigger, player) {
 				event.result = await player
-					.chooseToDiscard("he", card => get.suit(card) === "spade", get.prompt2("ccz_xuanwubaoyu", trigger.player))
+					.chooseToDiscard("h", card => get.suit(card) === "spade", get.prompt2("ccz_xuanwubaoyu", trigger.player))
 					.set("ai", card => {
 						if (get.attitude(get.player(), _status.event.getTrigger().player) >= 0) {
 							return 0;
@@ -1070,7 +1082,7 @@ export default {
 		// 武器
 		ccz_fangtianhuaji: "方天画戟",
 		ccz_fangtianhuaji_bg: "戟",
-		ccz_fangtianhuaji_info: "当你使用【杀】对目标角色造成伤害后，你可以弃置一张牌，视为对该角色的上家或下家使用一张【杀】。每名角色每回合限一次。",
+		ccz_fangtianhuaji_info: "当你使用【杀】对目标角色造成伤害后，你可以弃置一张手牌，视为对该角色的上家或下家使用一张【杀】。每名角色每回合限一次。",
 		ccz_fangtianhuaji_skill: "方天画戟",
 		ccz_fangtianhuaji_skill_info: "当你使用【杀】对目标角色造成伤害后，你可以弃置一张牌，视为对该角色的上家或下家使用一张【杀】。每名角色每回合限一次。",
 
@@ -1207,9 +1219,9 @@ export default {
 		// 武器（赤霄剑）
 		ccz_chixiaojian: "赤霄剑",
 		ccz_chixiaojian_bg: "霄",
-		ccz_chixiaojian_info: "当你使用的【杀】被【闪】抵消后，你可以弃置一张牌，令目标角色仍受到此【杀】的伤害。",
+		ccz_chixiaojian_info: "当你使用的【杀】被【闪】抵消后，你可以弃置一张手牌，令目标角色仍受到此【杀】的伤害。",
 		ccz_chixiaojian_skill: "赤霄剑",
-		ccz_chixiaojian_skill_info: "当你使用的【杀】被【闪】抵消后，你可以弃置一张牌，令目标角色仍受到此【杀】的伤害。",
+		ccz_chixiaojian_skill_info: "当你使用的【杀】被【闪】抵消后，你可以弃置一张手牌，令目标角色仍受到此【杀】的伤害。",
 
 		// 四象宝玉
 		ccz_qinglongbaoyu: "青龙宝玉",
@@ -1220,21 +1232,21 @@ export default {
 
 		ccz_zhuquebaoyu: "朱雀宝玉",
 		ccz_zhuquebaoyu_bg: "雀",
-		ccz_zhuquebaoyu_info: "出牌阶段限一次，你可以弃置一张方块牌，对一名其他角色及其上下家各造成1点火焰伤害。",
+		ccz_zhuquebaoyu_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火焰伤害。",
 		ccz_zhuquebaoyu_skill: "朱雀宝玉",
-		ccz_zhuquebaoyu_skill_info: "出牌阶段限一次，你可以弃置一张方块牌，对一名其他角色及其上下家各造成1点火焰伤害。",
+		ccz_zhuquebaoyu_skill_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火焰伤害。",
 
 		ccz_baihubaoyu: "白虎宝玉",
 		ccz_baihubaoyu_bg: "虎",
-		ccz_baihubaoyu_info: "出牌阶段限一次，你可以弃置一张红桃牌，令至多三名已受伤的角色各回复1点体力。",
+		ccz_baihubaoyu_info: "出牌阶段限一次，你可以弃置一张红桃手牌，令至多两名已受伤的角色各回复1点体力。",
 		ccz_baihubaoyu_skill: "白虎宝玉",
-		ccz_baihubaoyu_skill_info: "出牌阶段限一次，你可以弃置一张红桃牌，令至多三名已受伤的角色各回复1点体力。",
+		ccz_baihubaoyu_skill_info: "出牌阶段限一次，你可以弃置一张红桃手牌，令至多两名已受伤的角色各回复1点体力。",
 
 		ccz_xuanwubaoyu: "玄武宝玉",
 		ccz_xuanwubaoyu_bg: "武",
-		ccz_xuanwubaoyu_info: "当你对一名其他角色造成伤害后，你可以弃置一张黑桃牌并进行判定：若点数为1~4，其本回合与下回合内不能使用【杀】；5~8，不能发动技能；9~12，不能使用锦囊牌；13则无效果。",
+		ccz_xuanwubaoyu_info: "当你对一名其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定：若点数为1~4，其本回合与下回合内不能使用【杀】；5~8，不能发动技能；9~12，不能使用锦囊牌；13则无效果。",
 		ccz_xuanwubaoyu_skill: "玄武宝玉",
-		ccz_xuanwubaoyu_skill_info: "当你对一名其他角色造成伤害后，你可以弃置一张黑桃牌并进行判定：若点数为1~4，其本回合与下回合内不能使用【杀】；5~8，不能发动技能；9~12，不能使用锦囊牌；13则无效果。",
+		ccz_xuanwubaoyu_skill_info: "当你对一名其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定：若点数为1~4，其本回合与下回合内不能使用【杀】；5~8，不能发动技能；9~12，不能使用锦囊牌；13则无效果。",
 		ccz_hunluan: "混乱",
 		ccz_hunluan_info: "你不能使用锦囊牌。",
 
