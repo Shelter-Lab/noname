@@ -27,11 +27,14 @@
  * 用法：
  *   node scripts/pile-ratio.mjs                      # 跑内置对照场景
  *   node scripts/pile-ratio.mjs --packs standard,extra,caocaozhuan \
- *        --ban hanbing,fangtian,bagua,zhuge,tengjia --refill all
+ *        --ban standard:hanbing,standard:fangtian,standard:bagua,standard:zhuge,extra:tengjia \
+ *        --refill all
  *   --refill 取值：all（全部补充）/ default（游戏默认档）/ none（关掉扩展）
  *                  或逐项指定 sha=1,shan=1,tao=0.5,...
  *   --packs 可选：standard extra sp yingbian guozhan zhulu xianxia yongjian huodong caocaozhuan
- *   --ban   写牌名（如 bagua），重复的牌写几次就禁几张
+ *   --ban   写「包名:牌名」，同一张写几次就禁几张。**必须带包名** ——
+ *           同名牌会出现在多个包里（藤甲在 extra 和 yingbian 都有），
+ *           只写牌名会在每个包各削一遍，算出来的数是错的。
  */
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -149,17 +152,26 @@ const BUCKET = { basic: "基本", trick: "锦囊", delay: "延时", equip: "装�
 
 function build({ lists, types }, { packs, banned = {}, cfg }) {
 	// ① 各包 list 汇总；banned 按张数削减（计数分析下与游戏里按 index 删等价）
+	//    banned 的键是 "包名:牌名"，与游戏里 bannedpile 按包索引的语义对齐 ——
+	//    同名牌可能出现在多个包里（藤甲在军争和应变都有），一律按牌名削会削错。
+	const quota = {};
+	for (const key in banned) {
+		quota[key] = banned[key];
+	}
 	const base = [];
 	for (const pack of packs) {
-		const quota = { ...banned };
 		for (const entry of lists[pack]) {
-			const name = entry[2];
-			if (quota[name] > 0) {
-				quota[name]--;
+			const key = `${pack}:${entry[2]}`;
+			if (quota[key] > 0) {
+				quota[key]--;
 				continue;
 			}
-			base.push(name);
+			base.push(entry[2]);
 		}
+	}
+	const leftover = Object.entries(quota).filter(([, n]) => n > 0);
+	if (leftover.length) {
+		throw new Error(`--ban 里这些没削够（牌名写错，或该包里就没这么多张）：${leftover.map(([k, n]) => `${k}×${n}`).join(" ")}`);
 	}
 	const packTotal = base.length;
 
@@ -249,12 +261,15 @@ if (arg("packs")) {
 	}
 	const banned = {};
 	for (const n of (arg("ban") || "").split(",").filter(Boolean)) {
+		if (!n.includes(":")) {
+			throw new Error(`--ban 要写成「包名:牌名」（如 zhulu:yajiaoqiang），收到 "${n}"`);
+		}
 		banned[n] = (banned[n] || 0) + 1;
 	}
 	report(`${packs.join("+")}${Object.keys(banned).length ? ` 禁${Object.values(banned).reduce((a, b) => a + b, 0)}张` : ""}`, build(data, { packs, banned, cfg: parseRefill(arg("refill")) }));
 } else {
 	// 内置对照场景：军争基准 → 当前配置 → 逐个候选包的边际效果
-	const BAN = { hanbing: 1, fangtian: 1, bagua: 1, zhuge: 1, tengjia: 1 };
+	const BAN = { "standard:hanbing": 1, "standard:fangtian": 1, "standard:bagua": 1, "standard:zhuge": 1, "extra:tengjia": 1 };
 	const CUR = ["standard", "extra", "caocaozhuan"];
 	report("① 军争基准（standard+extra，不开补充）", build(data, { packs: ["standard", "extra"], cfg: CFG_NONE }));
 	report("② +曹操传，禁 5 张重复装备，全部补充", build(data, { packs: CUR, banned: BAN, cfg: CFG_ALL }));

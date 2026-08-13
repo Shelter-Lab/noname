@@ -82,6 +82,21 @@ dn  = num × (lib.card.list.length − 160) / (160 − num)   // 上限 1000
 
 ## 三、各候选卡牌包的成分
 
+游戏里「选项 → 卡牌」显示的中文名（`apps/core/game/package.js:39-50`）：
+
+| id | 菜单里显示 |
+|---|---|
+| `standard` | 标准 |
+| `extra` | 军争 |
+| `guozhan` | 国战 |
+| `yingbian` | 应变篇 |
+| `yongjian` | 用间篇 |
+| `sp` | **忠胆英杰** |
+| `zhulu` | 逐鹿天下 |
+| `huodong` | 活动卡牌 |
+| `xianxia` | **线下卡牌** |
+| `caocaozhuan` | 曹操传 |
+
 | 包 | 张数 | 自身杀 | 装备占比 | 内容 |
 |---|---|---|---|---|
 | `standard` 标准 | 108 | 30 | 19/108 | 基础牌 |
@@ -116,10 +131,31 @@ dn  = num × (lib.card.list.length − 160) / (160 − num)   // 上限 1000
 ```bash
 node scripts/pile-ratio.mjs                       # 上面这些对照场景
 node scripts/pile-ratio.mjs \
-  --packs standard,extra,caocaozhuan,zhulu,sp \
-  --ban hanbing,fangtian,bagua,zhuge,tengjia \
+  --packs standard,extra,caocaozhuan,zhulu \
+  --ban standard:hanbing,standard:fangtian,standard:bagua,standard:zhuge,extra:tengjia \
   --refill all                                    # all / default / none / sha=1,shan=0.5,...
 ```
+
+`--ban` **必须写「包名:牌名」**，同一张写几次就禁几张。只写牌名会在每个包各削一遍
+（藤甲在 `extra` 和 `yingbian` 都有），算出来的数是错的 —— 脚本现在直接报错拦住。
+
+## 七、单独关掉某个包里的装备
+
+逐鹿/忠胆里也有装备牌，若只想要它们的基本牌和锦囊，在「编辑牌堆」里把装备逐张勾掉：
+
+- 逐鹿 8 张装备：`yajiaoqiang` 涯角枪、`yinfengjia` 引蜂甲、`zheji` 折戟、`jinhe` 锦盒、
+  `numa` 驽马、`nvzhuang` 女装、`wufengjian` 无锋剑、`yexingyi` 夜行衣
+- 忠胆 5 张装备：`lanyinjia` 烂银甲×2、`yinyueqiang` 银月枪、`qibaodao` 七宝刀、`zhungangshuo` 衠钢槊
+
+| 配置 | 总张数 | 装备 | 锦囊 | 杀 |
+|---|---|---|---|---|
+| ② + 逐鹿全开 | 337 | 16.0% | 23.7% | 30.6% |
+| ② + 逐鹿（禁 8 装备） | 316 | **14.6%** | 25.0% | **30.4%** |
+| ② + 逐鹿 + 忠胆，两个包的装备都禁 | 367 | **12.5%** | **27.2%** | 30.0% |
+| ② + 逐鹿（禁装备**和基本牌**，只留 8 锦囊） | 259 | 17.8% | 26.3% | 27.4% |
+
+最后一行说明：**逐鹿那 9 张杀不该关**。关掉基本牌等于把它退化成一个 8 张的纯锦囊包，
+杀掉回 27.4%（=不开包的水平），装备也只压到 17.8%。
 
 ## 六、游戏里在哪调
 
