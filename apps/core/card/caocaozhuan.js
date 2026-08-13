@@ -76,7 +76,7 @@ export default {
 			type: "equip",
 			subtype: "equip1",
 			distance: { attackFrom: -3 },
-			ai: { basic: { equipValue: 6 } },
+			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_fangtianhuaji_skill"],
 		},
 
@@ -92,7 +92,7 @@ export default {
 			type: "equip",
 			subtype: "equip1",
 			distance: { attackFrom: -2 },
-			ai: { basic: { equipValue: 5 } },
+			ai: { basic: { equipValue: 4 } },
 			skills: ["ccz_lvbuzhigong_skill"],
 		},
 
@@ -102,7 +102,7 @@ export default {
 			type: "equip",
 			subtype: "equip1",
 			distance: { attackFrom: -2 },
-			ai: { basic: { equipValue: 5 } },
+			ai: { basic: { equipValue: 4 } },
 			skills: ["ccz_ligzhigong_skill"],
 		},
 
@@ -117,7 +117,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip1",
-			ai: { basic: { equipValue: 6 } },
+			ai: { basic: { equipValue: 4 } },
 			skills: ["ccz_jinhuoguanpao_skill"],
 		},
 
@@ -133,7 +133,7 @@ export default {
 			type: "equip",
 			subtype: "equip1",
 			distance: { attackFrom: -1 },
-			ai: { basic: { equipValue: 4 } },
+			ai: { basic: { equipValue: 3 } },
 			skills: ["ccz_wuhuoshenyanshan_skill"],
 		},
 
@@ -143,7 +143,7 @@ export default {
 			type: "equip",
 			subtype: "equip1",
 			distance: { attackFrom: -1 },
-			ai: { basic: { equipValue: 6 } },
+			ai: { basic: { equipValue: 4 } },
 			skills: ["ccz_qixingjian_skill"],
 		},
 
@@ -162,9 +162,29 @@ export default {
 			type: "equip",
 			subtype: "equip1",
 			distance: { attackFrom: -3 },
-			ai: { basic: { equipValue: 7 } },
+			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_luanji"],
 		},
+		/**
+		 * 赤霄剑 —— 刘邦斩白蛇起义之剑，汉室正统的象征。本体没有这张（已核对全部装备名）。
+		 * 【为什么不照抄民间卡牌那张「斩蛇之剑」】那张是"你的杀无法闪避 + 防御距离-1"。
+		 * "杀不可闪"在本体压根不存在（全库零命中），这不是巧合：【闪】是三国杀防御体系的
+		 * 地基，一把常驻的"杀全部不可闪"武器会让防守方摸到【闪】等于摸到废牌。
+		 * 民间包敢这么做是因为它本来就不追求平衡。
+		 * 【改成什么】保留"天命所归、一击必中"的观感，但给明确成本：被闪之后弃一张牌
+		 * 仍造成伤害。机制上是青龙偃月刀（被闪可再出杀）与贯石斧（弃牌强制伤害）的混合，
+		 * 本体两个先例都有，AI 也认。
+		 * 【范围只给 2】效果强就该近战 —— 与雌雄双股剑、青釭剑（都是范围 2）同档。
+		 */
+		ccz_chixiaojian: {
+			fullskin: true,
+			type: "equip",
+			subtype: "equip1",
+			distance: { attackFrom: -1 },
+			ai: { basic: { equipValue: 5 } },
+			skills: ["ccz_chixiaojian_skill"],
+		},
+
 
 		// ================= 防具 =================
 
@@ -180,7 +200,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip2",
-			ai: { basic: { equipValue: 7 } },
+			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_jingkai_skill"],
 		},
 
@@ -194,7 +214,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip2",
-			ai: { basic: { equipValue: 8 } },
+			ai: { basic: { equipValue: 6 } },
 			skills: ["ccz_lianhuankai_skill"],
 		},
 
@@ -203,7 +223,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip2",
-			ai: { basic: { equipValue: 7 } },
+			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_huangjinkai_skill"],
 		},
 
@@ -218,7 +238,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip2",
-			ai: { basic: { equipValue: 7 } },
+			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_baiyinkai_skill"],
 		},
 
@@ -231,7 +251,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip2",
-			ai: { basic: { equipValue: 8 } },
+			ai: { basic: { equipValue: 6 } },
 			skills: ["ccz_longlinkai_skill"],
 		},
 
@@ -240,7 +260,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip2",
-			ai: { basic: { equipValue: 7 } },
+			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_fenghuangyuyi_skill"],
 		},
 
@@ -256,7 +276,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip5",
-			ai: { basic: { equipValue: 8 } },
+			ai: { basic: { equipValue: 6 } },
 			skills: ["ccz_quanmou"],
 		},
 
@@ -269,7 +289,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip5",
-			ai: { basic: { equipValue: 8 } },
+			ai: { basic: { equipValue: 6 } },
 			skills: ["ccz_qingnang"],
 		},
 
@@ -283,7 +303,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip5",
-			ai: { basic: { equipValue: 9 } },
+			ai: { basic: { equipValue: 7 } },
 			skills: ["ccz_yuxi_skill", "ccz_yuxi_lose"],
 		},
 
@@ -296,7 +316,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip5",
-			ai: { basic: { equipValue: 10 } },
+			ai: { basic: { equipValue: 7 } },
 			skills: ["ccz_taipingyaoshu_skill"],
 		},
 
@@ -311,9 +331,114 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip5",
-			ai: { basic: { equipValue: 8 } },
+			ai: { basic: { equipValue: 6 } },
 			skills: ["ccz_taipingqinglingdao_skill"],
 		},
+		// ================= 坐骑 =================
+
+		/**
+		 * 白龙驹 —— 赵云坐骑（演义常见说法）。原作 50 件里的坐骑（赤兔、的卢、绝影、
+		 * 爪黄飞电）本体全都有了，故换两匹本体没占的三国名马来补坐骑这一类。
+		 * 【为什么要补坐骑】本包前 18 件里坐骑是 0 张，而武器 +7、防具 +6、宝物 +5 ——
+		 * 加进「标准+军争」后坐骑仍是原来那 7 张，占比被稀释。坐骑是距离博弈的关键牌，
+		 * 稀释了会让"打不到人"这一层策略变弱。
+		 * 效果同大宛/赤兔：你算距离 -1（进攻型），配赵云机动突进的形象。
+		 */
+		ccz_bailongju: {
+			fullskin: true,
+			type: "equip",
+			subtype: "equip4",
+			distance: { globalFrom: -1 },
+			ai: { basic: { equipValue: 3 } },
+		},
+
+		/**
+		 * 乌云踏雪 —— 张飞坐骑（黑身白蹄）。效果同的卢/绝影：别人算与你的距离 +1（防御型），
+		 * 配张飞冲阵抗打的形象。一匹 +1马 一匹 -1马，保持本体两类坐骑的均衡
+		 * （本体现有 -1马 5 张、+1马 6 张）。
+		 */
+		ccz_wuyuntaxue: {
+			fullskin: true,
+			type: "equip",
+			subtype: "equip3",
+			distance: { globalTo: 1 },
+			ai: { basic: { equipValue: 3 } },
+		},
+
+		// ================= 四象宝玉（宝物）=================
+		//
+		// 原作四神是"召唤术"：青龙随机 5 次闪电（雨雪天）、朱雀 3×3 火焰（晴天）、
+		// 玄武全场随机施加状态（阴天）、白虎我方全体觉醒+补给（无天气限制）。
+		// 三国杀没有召唤与天气，故：**天气限制 → 判定/弃花色**，各神保留自己的性格，
+		// 不做成一个模板复制四遍。
+		// 花色对应五行方位，且与机制自洽：
+		//   青龙 ♣ 东方木（梅花形似草木）  朱雀 ♦ 南方火（方块是红色）
+		//   白虎 ♥ 红桃（桃=回血，机制驱动） 玄武 ♠ 北方水
+		// 四件同在 equip5，一次只能装一件 —— 正好还原原作"宝玉四选一"。
+
+		/**
+		 * 青龙宝玉 —— 原作"随机 5 次闪电"。
+		 * 【为什么用判定而不是弃牌】原作的特征就是次数不定、有好有坏，判定才还原得了；
+		 * 若改成"弃♣必中 2 点"，期望更高(2.0 vs 1.5)但丢掉了那个特征。
+		 * 【为什么是"固定三次各自独立"而不是"失败即中止"】后者期望只有 0.875
+		 * (0.5+0.25+0.125)，一发红就结束、太弱；固定三次期望 1.5，且能打出 0~3 的波动。
+		 * 顺带三次判定 = 三张牌进弃牌堆，会触发天妒之类吃判定牌的技能，互动更多。
+		 */
+		ccz_qinglongbaoyu: {
+			fullskin: true,
+			type: "equip",
+			subtype: "equip5",
+			ai: { basic: { equipValue: 7 } },
+			skills: ["ccz_qinglongbaoyu_skill"],
+		},
+
+		/**
+		 * 朱雀宝玉 —— 原作"3×3 范围火焰"。目标 + 其上下家 = 三人，正是 3×3 的意思。
+		 * 一张♦换 3 点火伤看着很赚，但：火属性会被藤甲/黄金铠/太平要术挡、
+		 * 打三个人意味着三个人都记恨你、且得先摸到♦。这是本包最需要实战验证的一张。
+		 */
+		ccz_zhuquebaoyu: {
+			fullskin: true,
+			type: "equip",
+			subtype: "equip5",
+			ai: { basic: { equipValue: 7 } },
+			skills: ["ccz_zhuquebaoyu_skill"],
+		},
+
+		/**
+		 * 白虎宝玉 —— 原作"我方和友军全体觉醒+大补给"，且是四神里唯一无天气限制的。
+		 * 译成群体回血。【为什么不直接当【桃园结义】用】桃园是"所有人各回 1"，含敌人；
+		 * 改成"至多 3 名角色"就有了选择空间，也更贴"补给我方"的原意。
+		 * 净收益其实不高（弃一张♥、自己最多回 1），价值在给队友送血。
+		 */
+		ccz_baihubaoyu: {
+			fullskin: true,
+			type: "equip",
+			subtype: "equip5",
+			ai: { basic: { equipValue: 7 } },
+			skills: ["ccz_baihubaoyu_skill"],
+		},
+
+		/**
+		 * 玄武宝玉 —— 原作"对全场随机施加一种状态（中毒/麻痹/禁咒/混乱…）"。
+		 * 【用点数区间还原"随机施加"】判定牌点数 1~4 / 5~8 / 9~12 各 4/13 = 30.8%，
+		 * 13 则失效 1/13 = 7.7%。三段各一种 debuff、小概率翻车 —— 高成功率但有反噬，
+		 * 正是召唤术该有的手感；而且比"你自己三选一"更还原原作。
+		 * 【为什么点数随机反而对 AI 友好】AI 只需估"这个效果整体值不值得"，
+		 * 不必预判具体哪一项 —— 若做成"你自己选"，三个 debuff 对不同武将价值天差地别，
+		 * AI 反而要写一堆针对性判断。
+		 * 【为什么挂在"造成伤害后"而不是主动使用】有前置条件（得先打中人），不是无脑控场；
+		 * 且与吕布之弓/李广之弓形成体系 —— 那两件是武器自带单一 debuff，
+		 * 玄武是宝物版、三段随机且能禁锦囊（两把弓做不到），不占武器位。
+		 */
+		ccz_xuanwubaoyu: {
+			fullskin: true,
+			type: "equip",
+			subtype: "equip5",
+			ai: { basic: { equipValue: 7 } },
+			skills: ["ccz_xuanwubaoyu_skill"],
+		},
+
 	},
 
 	skill: {
@@ -740,6 +865,205 @@ export default {
 		},
 	},
 
+
+		// —— 赤霄剑：【杀】被闪抵消后，可弃一张牌令其仍造成伤害 ——
+		ccz_chixiaojian_skill: {
+			equipSkill: true,
+			trigger: { player: ["shaMiss", "eventNeutralized"] },
+			filter(event, player) {
+				if (!event.card || event.card.name !== "sha" || !event.target?.isIn()) {
+					return false;
+				}
+				return player.countCards("he") > 0;
+			},
+			async cost(event, trigger, player) {
+				event.result = await player
+					.chooseToDiscard("he", get.prompt2("ccz_chixiaojian", trigger.target))
+					.set("ai", card => {
+						// 目标是敌人才值得弃牌;弃的牌越便宜越好
+						const t = _status.event.getTrigger().target;
+						if (get.attitude(get.player(), t) >= 0) {
+							return 0;
+						}
+						return 8 - get.value(card);
+					})
+					.forResult();
+			},
+			async content(event, trigger, player) {
+				await trigger.target.damage(player, get.nature(trigger.card));
+			},
+		},
+
+		// —— 青龙宝玉：三次判定，每次黑色造成 1 点雷电伤害 ——
+		ccz_qinglongbaoyu_skill: {
+			equipSkill: true,
+			enable: "phaseUse",
+			usable: 1,
+			filterTarget(card, player, target) {
+				return target !== player;
+			},
+			async content(event, trigger, player) {
+				const target = event.target;
+				for (let i = 0; i < 3; i++) {
+					// 目标死了/自己死了就停,别对着空位继续判
+					if (!target.isIn() || !player.isIn()) {
+						break;
+					}
+					const { color } = await player
+						.judge(card => (get.color(card) === "black" ? 2 : -2))
+						.set("judge2", result => result.bool)
+						.forResult();
+					if (color === "black") {
+						await target.damage(player, "thunder");
+					}
+				}
+			},
+			ai: {
+				order: 8,
+				result: {
+					// 期望 1.5 点雷电伤害。damageEffect 会自动算目标血量/属性/防具/会不会被杀死,
+					// 乘以 1.5 就是期望收益 —— 不用自己算"值不值得"。
+					target(player, target) {
+						return 1.5 * get.damageEffect(target, player, target, "thunder");
+					},
+				},
+			},
+		},
+
+		// —— 朱雀宝玉：弃♦，对目标及其上下家各 1 点火焰伤害 ——
+		ccz_zhuquebaoyu_skill: {
+			equipSkill: true,
+			enable: "phaseUse",
+			usable: 1,
+			filterCard(card) {
+				return get.suit(card) === "diamond";
+			},
+			position: "he",
+			check(card) {
+				return 8 - get.value(card);
+			},
+			filterTarget(card, player, target) {
+				return target !== player;
+			},
+			async content(event, trigger, player) {
+				const target = event.target;
+				// 先把三个目标定下来再逐个结算 —— 否则前一个死了会改变 next/previous 的指向
+				const list = [target, target.next, target.previous].filter(t => t?.isIn() && t !== player);
+				for (const t of new Set(list)) {
+					if (t.isIn()) {
+						await t.damage(player, "fire");
+					}
+				}
+			},
+			ai: {
+				order: 8.5,
+				result: {
+					target(player, target) {
+						// 三个人的收益要加起来:主目标 + 上下家(排除自己)
+						let sum = get.damageEffect(target, player, player, "fire");
+						for (const t of [target.next, target.previous]) {
+							if (t && t !== player && t !== target && t.isIn()) {
+								sum += get.damageEffect(t, player, player, "fire");
+							}
+						}
+						return sum;
+					},
+				},
+			},
+		},
+
+		// —— 白虎宝玉：弃♥，至多 3 名角色各回复 1 点体力 ——
+		ccz_baihubaoyu_skill: {
+			equipSkill: true,
+			enable: "phaseUse",
+			usable: 1,
+			filterCard(card) {
+				return get.suit(card) === "heart";
+			},
+			position: "he",
+			check(card) {
+				return 8 - get.value(card);
+			},
+			selectTarget: [1, 3],
+			multitarget: true,
+			multiline: true,
+			filterTarget(card, player, target) {
+				return target.isDamaged();
+			},
+			async content(event, trigger, player) {
+				for (const t of event.targets) {
+					if (t.isIn() && t.isDamaged()) {
+						await t.recover();
+					}
+				}
+			},
+			ai: {
+				order: 9,
+				result: {
+					target(player, target) {
+						return get.recoverEffect(target, player, target);
+					},
+				},
+			},
+		},
+
+		// —— 玄武宝玉：造成伤害后弃♠，按判定点数施加一种 debuff ——
+		ccz_xuanwubaoyu_skill: {
+			equipSkill: true,
+			trigger: { source: "damageSource" },
+			filter(event, player) {
+				return event.player?.isIn() && player.countCards("he", card => get.suit(card) === "spade") > 0;
+			},
+			async cost(event, trigger, player) {
+				event.result = await player
+					.chooseToDiscard("he", card => get.suit(card) === "spade", get.prompt2("ccz_xuanwubaoyu", trigger.player))
+					.set("ai", card => {
+						if (get.attitude(get.player(), _status.event.getTrigger().player) >= 0) {
+							return 0;
+						}
+						return 8 - get.value(card);
+					})
+					.forResult();
+			},
+			async content(event, trigger, player) {
+				const target = trigger.player;
+				const { number } = await player.judge(() => 0).forResult();
+				// 1~4 麻痹(禁杀) / 5~8 禁咒(禁技能) / 9~12 混乱(禁锦囊) / 13 失效
+				// 各段 4/13 = 30.8%,13 只占 1/13 = 7.7% —— 高成功率但有小概率反噬。
+				let skill = null;
+				if (number >= 1 && number <= 4) {
+					skill = "ccz_mabi";
+				} else if (number >= 5 && number <= 8) {
+					skill = "ccz_jinzhou";
+				} else if (number >= 9 && number <= 12) {
+					skill = "ccz_hunluan";
+				}
+				if (!skill) {
+					player.popup("失效", "fire");
+					return;
+				}
+				target.addTempSkill(skill, { player: "phaseAfter" });
+			},
+			ai: {
+				// 12/13 概率能施加一个 debuff,期望价值按"控住对手一轮"算
+				expose: 0.2,
+			},
+		},
+
+		/** 混乱：不能使用锦囊牌。与 ccz_mabi(禁杀)、ccz_jinzhou(禁技能) 同族 */
+		ccz_hunluan: {
+			mark: true,
+			marktext: "乱",
+			intro: { content: "不能使用锦囊牌" },
+			mod: {
+				cardEnabled(card) {
+					if (get.type2(card) === "trick") {
+						return false;
+					}
+				},
+			},
+		},
+
 	translate: {
 		caocaozhuan_card_config: "曹操传",
 
@@ -870,6 +1194,50 @@ export default {
 	 * 铠甲给♣（厚重）、宝物给♦（珍宝）。同一花色内点数不重复，免得同花色同点数
 	 * 在【无懈可击】判定、以及吃花色的技能（制衡、洛神等）里产生怪异手感。
 	 */
+
+		// 坐骑
+		ccz_bailongju: "白龙驹",
+		ccz_bailongju_bg: "+1",
+		ccz_bailongju_info: "锁定技，你计算与其他角色的距离时始终-1。",
+
+		ccz_wuyuntaxue: "乌云踏雪",
+		ccz_wuyuntaxue_bg: "-1",
+		ccz_wuyuntaxue_info: "锁定技，其他角色计算与你的距离时始终+1。",
+
+		// 武器（赤霄剑）
+		ccz_chixiaojian: "赤霄剑",
+		ccz_chixiaojian_bg: "霄",
+		ccz_chixiaojian_info: "当你使用的【杀】被【闪】抵消后，你可以弃置一张牌，令目标角色仍受到此【杀】的伤害。",
+		ccz_chixiaojian_skill: "赤霄剑",
+		ccz_chixiaojian_skill_info: "当你使用的【杀】被【闪】抵消后，你可以弃置一张牌，令目标角色仍受到此【杀】的伤害。",
+
+		// 四象宝玉
+		ccz_qinglongbaoyu: "青龙宝玉",
+		ccz_qinglongbaoyu_bg: "龙",
+		ccz_qinglongbaoyu_info: "出牌阶段限一次，你可以选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
+		ccz_qinglongbaoyu_skill: "青龙宝玉",
+		ccz_qinglongbaoyu_skill_info: "出牌阶段限一次，你可以选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
+
+		ccz_zhuquebaoyu: "朱雀宝玉",
+		ccz_zhuquebaoyu_bg: "雀",
+		ccz_zhuquebaoyu_info: "出牌阶段限一次，你可以弃置一张方块牌，对一名其他角色及其上下家各造成1点火焰伤害。",
+		ccz_zhuquebaoyu_skill: "朱雀宝玉",
+		ccz_zhuquebaoyu_skill_info: "出牌阶段限一次，你可以弃置一张方块牌，对一名其他角色及其上下家各造成1点火焰伤害。",
+
+		ccz_baihubaoyu: "白虎宝玉",
+		ccz_baihubaoyu_bg: "虎",
+		ccz_baihubaoyu_info: "出牌阶段限一次，你可以弃置一张红桃牌，令至多三名已受伤的角色各回复1点体力。",
+		ccz_baihubaoyu_skill: "白虎宝玉",
+		ccz_baihubaoyu_skill_info: "出牌阶段限一次，你可以弃置一张红桃牌，令至多三名已受伤的角色各回复1点体力。",
+
+		ccz_xuanwubaoyu: "玄武宝玉",
+		ccz_xuanwubaoyu_bg: "武",
+		ccz_xuanwubaoyu_info: "当你对一名其他角色造成伤害后，你可以弃置一张黑桃牌并进行判定：若点数为1~4，其本回合与下回合内不能使用【杀】；5~8，不能发动技能；9~12，不能使用锦囊牌；13则无效果。",
+		ccz_xuanwubaoyu_skill: "玄武宝玉",
+		ccz_xuanwubaoyu_skill_info: "当你对一名其他角色造成伤害后，你可以弃置一张黑桃牌并进行判定：若点数为1~4，其本回合与下回合内不能使用【杀】；5~8，不能发动技能；9~12，不能使用锦囊牌；13则无效果。",
+		ccz_hunluan: "混乱",
+		ccz_hunluan_info: "你不能使用锦囊牌。",
+
 	list: [
 		// 武器
 		["spade", 12, "ccz_fangtianhuaji"],
@@ -892,5 +1260,15 @@ export default {
 		["diamond", 13, "ccz_yuxi"],
 		["heart", 6, "ccz_taipingyaoshu"],
 		["diamond", 11, "ccz_taipingqinglingdao"],
+		// 坐骑
+		["heart", 3, "ccz_bailongju"],
+		["spade", 5, "ccz_wuyuntaxue"],
+		// 武器（赤霄剑）
+		["diamond", 12, "ccz_chixiaojian"],
+		// 四象宝玉：花色对应五行方位（青龙♣东方木、朱雀♦南方火、白虎♥红桃、玄武♠北方水）
+		["club", 1, "ccz_qinglongbaoyu"],
+		["diamond", 1, "ccz_zhuquebaoyu"],
+		["heart", 1, "ccz_baihubaoyu"],
+		["spade", 1, "ccz_xuanwubaoyu"],
 	],
 };
