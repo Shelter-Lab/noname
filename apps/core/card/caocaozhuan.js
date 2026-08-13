@@ -121,7 +121,7 @@ export default {
 			subtype: "equip1",
 			// 攻击范围 5 —— 与本体麒麟弓并列全场最远。炮的射程本就该是最长的一档
 			distance: { attackFrom: -4 },
-			ai: { basic: { equipValue: 4 } },
+			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_jinhuoguanpao_skill"],
 		},
 
@@ -137,7 +137,7 @@ export default {
 			type: "equip",
 			subtype: "equip1",
 			distance: { attackFrom: -3 },
-			ai: { basic: { equipValue: 3 } },
+			ai: { basic: { equipValue: 4 } },
 			skills: ["ccz_wuhuoshenyanshan_skill"],
 		},
 
@@ -234,8 +234,11 @@ export default {
 		/**
 		 * 连环铠 —— 原作"防御两次攻击"（敌人的连续攻击只算一次）。
 		 * 译成"每回合只受一次【杀】造成的伤害"，非【杀】的伤害不受影响。
-		 * 【为什么用 clearTime】它让技能存的标记在回合结束时自动清空，
-		 * 不用自己挂 phaseEnd 去擦（standard.js 的 qinglong_skill 就这么用）。
+		 * 【记账靠 addTempSkill 的默认到期，不是 clearTime】默认到期是
+		 * { global: ["phaseAfter","phaseBeforeStart"] } —— 任意回合结束即清，正合"每回合"语义。
+		 * clearTime 这个字段在本体库里只出现在两处 UI 判断（info.direct && !info.clearTime），
+		 * **不清任何存储** —— 别再拿它当"回合末自动擦标记"用（本包曾因此让方天画戟的限次
+		 * 实际变成"每局限一次"）。
 		 */
 		ccz_lianhuankai: {
 			fullskin: true,
@@ -559,41 +562,103 @@ export default {
 			},
 		},
 
-		// —— 方天画戟 ——
+		// —— 方天画戟：【杀】命中后可弃牌连击，最多三刀（三英战吕布）——
 		ccz_fangtianhuaji_skill: {
 			equipSkill: true,
 			trigger: { source: "damageSource" },
-			// clearTime：回合结束自动清掉"本回合已被此法指定过的人"，不用自己擦
-			clearTime: true,
+			// 【usable: 2 —— 算上你自己那张【杀】正好三个人，即"三英战吕布"】
+			// 别把 usable 当"总共打几个人"读:它只数**技能发动了几次**。
+			// 你主动出的那张【杀】打 A 是第一个人，技能再发动 2 次牵连 B、C —— 合计三人。
+			// (曾经写 3，那是四个人，比典故多一个,而且 4 张卡换 4 次攻击在装备里偏猛。)
+			// 连锁本身不用写：这里用 useCard 打出的【杀】若造成伤害，会再次触发同一个 trigger，
+			// 于是自然形成"命中→再选一人→再命中→再选"的链。所以真正要做的只是**封顶** ——
+			// 不封顶的话手牌够就能连穿全场，那不是强，是失控。
+			// 【为什么用内建 usable 而不自己记账】原先是 markAuto 把"本回合打过谁"记进 storage +
+			// clearTime，两处都错：没有定义 ccz_fangtianhuaji_used 那个标记技能，没人清它，
+			// 实际退化成"每局限一次"；而 clearTime 在本体库里只有两处 UI 判断，压根不清存储。
+			usable: 2,
 			filter(event, player) {
-				// 【排除自伤】若【杀】打到自己，event.player 就是自己，next/previous 会指向
-				// 你的邻座 —— 变成"自伤一下就白砍邻座一刀"。
-				if (!event.card || event.card.name !== "sha" || !event.player?.isIn() || event.player === player) {
+				// 【排除自伤】若【杀】打到自己，event.player 就是自己 —— 那"选其他人"会把
+				// 自己当成起点，等于自伤一下就白得一刀。
+				// 【决斗也算】只吃【杀】的话触发面太窄。决斗赢了同样是你把人打疼了，
+				// 接着挥戟顺理成章;本包玉玺也是 ["sha","juedou"] 这一对，口径一致。
+				// 注:决斗输了的那次伤害来源是对方，source:"damageSource" 不会在你身上触发，不必额外排除。
+				if (!event.card || !["sha", "juedou"].includes(event.card.name) || !event.player?.isIn() || event.player === player) {
 					return false;
 				}
-				// 上/下家里还有没被此法打过的，且自己有牌可弃
+				// 【每名角色每回合限一次】只排除"刚被打的那个"是不够的:那样 A→B→A 仍成立
+				// （轮到选第三个时被排除的是 B），三刀就能集火两点砸在一人头上 ——
+				// 那是集火处刑，不是"战三英"。故用标记记下本回合已被此法牵连过的人。
+				// 【canUse 第三参 false = 无距离限制】连击那一下**不受攻击范围约束**，
+				// 能打全场任何人 —— 范围 3 只管你自己主动出的那张【杀】。
+				// 有意如此:吕布在阵中转身就砍，不该被"隔了两个人"挡住。
 				const done = player.getStorage("ccz_fangtianhuaji_used");
-				return [event.player.next, event.player.previous].some(t => t?.isIn() && t !== player && !done.includes(t) && player.canUse("sha", t, false)) && player.countCards("h") > 0;
+				return player.countCards("h") > 0 && game.hasPlayer(t => t !== player && t !== event.player && !done.includes(t) && (player.canUse("sha", t, false) || player.canUse("juedou", t, false)));
 			},
 			async cost(event, trigger, player) {
-				const done = player.getStorage("ccz_fangtianhuaji_used");
-				const list = [trigger.player.next, trigger.player.previous].filter(t => t?.isIn() && t !== player && !done.includes(t) && player.canUse("sha", t, false));
 				event.result = await player
-					.chooseTarget(get.prompt2("ccz_fangtianhuaji"), (card, player, target) => _status.event.list.includes(target))
-					.set("list", list)
-					.set("ai", target => get.effect(target, { name: "sha" }, get.player(), get.player()))
+					.chooseTarget(get.prompt2("ccz_fangtianhuaji"), (card, player, target) => {
+						if (target === player || target === _status.event.hurt || _status.event.done.includes(target)) {
+							return false;
+						}
+						return player.canUse("sha", target, false) || player.canUse("juedou", target, false);
+					})
+					.set("hurt", trigger.player)
+					.set("done", player.getStorage("ccz_fangtianhuaji_used"))
+					// 两者取更优的那个来估值 —— 否则对"只能决斗打得动"的目标会算出 0 而不选
+					.set("ai", target => {
+						const me = get.player();
+						return Math.max(me.canUse("sha", target, false) ? get.effect(target, { name: "sha" }, me, me) : 0, me.canUse("juedou", target, false) ? get.effect(target, { name: "juedou" }, me, me) : 0);
+					})
 					.forResult();
 			},
 			async content(event, trigger, player) {
 				const target = event.targets[0];
-				const { result } = await player.chooseToDiscard("h", true, `弃置一张牌，视为对${get.translation(target)}使用一张【杀】`);
+				const { result } = await player.chooseToDiscard("h", true, `弃置一张手牌，视为对${get.translation(target)}使用【杀】或【决斗】`);
 				if (!result?.bool) {
 					return;
 				}
-				player.markAuto("ccz_fangtianhuaji_used", [target]);
-				await player.useCard({ name: "sha", isCard: false }, target, false);
+				// 【杀 / 决斗二选一】决斗不能被【闪】挡，但拼杀输了伤的是自己 —— 是个真选择。
+				// 只把当下合法的那些列出来:若只有一个能用，直接用它，不拿单选项去烦人。
+				const usable = ["sha", "juedou"].filter(name => player.canUse(name, target, false));
+				if (!usable.length) {
+					return;
+				}
+				let name = usable[0];
+				if (usable.length > 1) {
+					const { result: pick } = await player
+						.chooseControl()
+						.set("prompt", `方天画戟：视为对${get.translation(target)}使用哪一张？`)
+						.set("choiceList", ["【杀】（可被【闪】抵消）", "【决斗】（拼杀，输了你受伤）"])
+						// 【目标要显式传进来，别靠 getParent() 猜事件链】猜错就是 undefined，
+						// get.effect 拿到 undefined 恒返回 0 → AI 永远选第 0 项(杀)，而且一声不响。
+						.set("targetx", target)
+						.set("ai", () => {
+							const me = get.event().player;
+							const t = get.event().targetx;
+							return get.effect(t, { name: "juedou" }, me, me) > get.effect(t, { name: "sha" }, me, me) ? 1 : 0;
+						})
+						.forResult();
+					name = pick.index === 1 ? "juedou" : "sha";
+				}
+				// 【标记要连"这一环的受害者"一起记】否则链头那个人没进名单，
+				// 绕一圈还能回头再打他 —— A→B→A 就是这么漏出来的。
+				player.addTempSkill("ccz_fangtianhuaji_used");
+				player.markAuto("ccz_fangtianhuaji_used", [trigger.player, target]);
+				await player.useCard({ name, isCard: false }, target, false);
 			},
 		},
+		/**
+		 * 记账用：本回合已被方天画戟牵连过的人。
+		 * 【三件事必须都对，否则限次静默失效】
+		 *  1. 必须**定义**这个技能 —— 只 markAuto 不定义，storage 里的数据没人管；
+		 *  2. 用 addTempSkill 挂上去，靠它的默认到期
+		 *     （{ global: ["phaseAfter","phaseBeforeStart"] }，任意回合结束即清）；
+		 *  3. onremove 必须写字符串 "storage" —— removeSkill 里只认 function 和 string 两种，
+		 *     写 onremove: true 落不到任何分支，storage 不会被清。
+		 * 本包曾因为漏了第 1 条，让"每回合限一次"实际变成"每局限一次"。
+		 */
+		ccz_fangtianhuaji_used: { charlotte: true, nopop: true, onremove: "storage" },
 
 		// —— 吕布之弓：下回合不能使用【杀】——
 		ccz_lvbuzhigong_skill: {
@@ -692,7 +757,7 @@ export default {
 			charlotte: true,
 			mark: true,
 			marktext: "灼",
-			intro: { content: "判定阶段开始时进行判定，若结果为梅花则流失1点体力" },
+			intro: { content: "判定阶段开始时进行判定，若判定结果为梅花则流失1点体力" },
 			trigger: { player: "phaseJudgeBegin" },
 			forced: true,
 			async content(event, trigger, player) {
@@ -765,7 +830,6 @@ export default {
 			equipSkill: true,
 			trigger: { player: "damageBegin4" },
 			forced: true,
-			clearTime: true,
 			filter(event, player) {
 				if (!event.card || event.card.name !== "sha") {
 					return false;
@@ -781,7 +845,9 @@ export default {
 			},
 			group: "ccz_lianhuankai_mark",
 		},
-		/** 记账用：本回合受过【杀】伤害就打个标记，clearTime 到回合结束自动清 */
+		/** 记账用：本回合受过【杀】伤害就打个标记。靠 addTempSkill 的默认到期
+		 * （{ global: ["phaseAfter","phaseBeforeStart"] }，任意回合结束即清）——
+		 * 不是靠 clearTime，那个字段在本体库里只有两处 UI 判断，不清存储。 */
 		ccz_lianhuankai_mark: {
 			equipSkill: true,
 			trigger: { player: "damageEnd" },
@@ -958,6 +1024,15 @@ export default {
 			equipSkill: true,
 			enable: "phaseUse",
 			usable: 1,
+			filterCard(card) {
+				return get.suit(card) === "club";
+			},
+			// 【只能弃手牌，不能弃装备区】"he" 会把装备区算进去 —— 而装备区里恰好有
+			// 这件宝玉本身，玩家能"弃掉青龙宝玉来发动青龙宝玉"。
+			position: "h",
+			check(card) {
+				return 8 - get.value(card);
+			},
 			filterTarget(card, player, target) {
 				return target !== player;
 			},
@@ -989,7 +1064,7 @@ export default {
 			},
 		},
 
-		// —— 朱雀宝玉：弃♦，对目标及其上下家各 1 点火焰伤害 ——
+		// —— 朱雀宝玉：弃♦，对目标及其上下家各 1 点火属性伤害 ——
 		ccz_zhuquebaoyu_skill: {
 			equipSkill: true,
 			enable: "phaseUse",
@@ -1072,6 +1147,9 @@ export default {
 		ccz_xuanwubaoyu_skill: {
 			equipSkill: true,
 			trigger: { source: "damageSource" },
+			// 【每回合限一次】不限的话一张【万箭齐发】打中 5 人 = 5 次伤害事件，
+			// 连弃 5 张黑桃就能把 5 个人全禁一轮。另三枚宝玉都是出牌阶段限一次，频率对齐。
+			usable: 1,
 			filter(event, player) {
 				// 【必须排除 event.player === player】damageSource 在"你造成伤害"时触发，
 				// 而"你对自己造成伤害"（苦肉、崩坏这类）同样满足 —— 不排除就会给自己上 debuff。
@@ -1094,7 +1172,7 @@ export default {
 			async content(event, trigger, player) {
 				const target = trigger.player;
 				const { number } = await player.judge(() => 0).forResult();
-				// 1~4 麻痹(禁杀) / 5~8 禁咒(禁技能) / 9~12 混乱(禁锦囊) / 13 失效
+				// A~4 麻痹(禁杀) / 5~8 禁咒(禁技能) / 9~Q 混乱(禁锦囊) / K 失效
 				// 各段 4/13 = 30.8%,13 只占 1/13 = 7.7% —— 高成功率但有小概率反噬。
 				let skill = null;
 				if (number >= 1 && number <= 4) {
@@ -1137,7 +1215,7 @@ export default {
 		// 武器
 		ccz_fangtianhuaji: "方天画戟",
 		ccz_fangtianhuaji_bg: "戟",
-		ccz_fangtianhuaji_info: "当你使用【杀】对目标角色造成伤害后，你可以弃置一张手牌，视为对该角色的上家或下家使用一张【杀】。每名角色每回合限一次。",
+		ccz_fangtianhuaji_info: "每回合限两次且每名角色限一次，当你使用【杀】或【决斗】对其他角色造成伤害后，你可以弃置一张手牌，视为对另一名角色使用一张【杀】或【决斗】（无距离限制）。",
 		ccz_fangtianhuaji_skill: "方天画戟",
 		ccz_fangtianhuaji_skill_info: "当你使用【杀】对目标角色造成伤害后，你可以弃置一张牌，视为对该角色的上家或下家使用一张【杀】。每名角色每回合限一次。",
 
@@ -1159,11 +1237,11 @@ export default {
 
 		ccz_jinhuoguanpao: "金火罐炮",
 		ccz_jinhuoguanpao_bg: "炮",
-		ccz_jinhuoguanpao_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色获得“灼伤”标记：其下个判定阶段开始时进行判定，若结果为梅花则流失1点体力。",
+		ccz_jinhuoguanpao_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色获得“灼伤”标记：其下个判定阶段开始时进行判定，若判定结果为梅花则流失1点体力。",
 		ccz_jinhuoguanpao_skill: "金火罐炮",
-		ccz_jinhuoguanpao_skill_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色获得“灼伤”标记：其下个判定阶段开始时进行判定，若结果为梅花则流失1点体力。",
+		ccz_jinhuoguanpao_skill_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色获得“灼伤”标记：其下个判定阶段开始时进行判定，若判定结果为梅花则流失1点体力。",
 		ccz_zhuoshang: "灼伤",
-		ccz_zhuoshang_info: "判定阶段开始时，你进行一次判定，若结果为梅花则流失1点体力。",
+		ccz_zhuoshang_info: "判定阶段开始时，你进行一次判定，若判定结果为梅花则流失1点体力。",
 
 		ccz_wuhuoshenyanshan: "五火神焰扇",
 		ccz_wuhuoshenyanshan_bg: "焰",
@@ -1192,7 +1270,7 @@ export default {
 
 		ccz_lianhuankai: "连环铠",
 		ccz_lianhuankai_bg: "环",
-		ccz_lianhuankai_info: "锁定技，每回合你只会受到一次【杀】造成的伤害，本回合内之后的【杀】伤害均无效。（非【杀】造成的伤害不受影响）",
+		ccz_lianhuankai_info: "锁定技，每回合你只会受到一次【杀】造成的伤害，之后的【杀】伤害均无效（非【杀】造成的伤害不受影响）。",
 		ccz_lianhuankai_skill: "连环铠",
 		ccz_lianhuankai_skill_info: "锁定技，每回合你第二次及以后受到【杀】造成的伤害时，此伤害无效。",
 
@@ -1204,9 +1282,9 @@ export default {
 
 		ccz_baiyinkai: "白银铠",
 		ccz_baiyinkai_bg: "银",
-		ccz_baiyinkai_info: "锁定技，不由卡牌造成的伤害（武将技能、毒等）对你无效。",
+		ccz_baiyinkai_info: "锁定技，不由卡牌造成的伤害（如武将技能造成的伤害）对你无效。",
 		ccz_baiyinkai_skill: "白银铠",
-		ccz_baiyinkai_skill_info: "锁定技，不由卡牌造成的伤害（武将技能、毒等）对你无效。",
+		ccz_baiyinkai_skill_info: "锁定技，不由卡牌造成的伤害（如武将技能造成的伤害）对你无效。",
 
 		ccz_longlinkai: "龙鳞铠",
 		ccz_longlinkai_bg: "鳞",
@@ -1272,15 +1350,15 @@ export default {
 		// 四象宝玉
 		ccz_qinglongbaoyu: "青龙宝玉",
 		ccz_qinglongbaoyu_bg: "龙",
-		ccz_qinglongbaoyu_info: "出牌阶段限一次，你可以选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
+		ccz_qinglongbaoyu_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
 		ccz_qinglongbaoyu_skill: "青龙宝玉",
-		ccz_qinglongbaoyu_skill_info: "出牌阶段限一次，你可以选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
+		ccz_qinglongbaoyu_skill_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
 
 		ccz_zhuquebaoyu: "朱雀宝玉",
 		ccz_zhuquebaoyu_bg: "雀",
-		ccz_zhuquebaoyu_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火焰伤害（你自己不受影响，故目标为你的邻座时只有两名角色受到伤害）。",
+		ccz_zhuquebaoyu_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火属性伤害（不含你，故目标为你的邻座时只有两名角色受到伤害）。",
 		ccz_zhuquebaoyu_skill: "朱雀宝玉",
-		ccz_zhuquebaoyu_skill_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火焰伤害（你自己不受影响，故目标为你的邻座时只有两名角色受到伤害）。",
+		ccz_zhuquebaoyu_skill_info: "出牌阶段限一次，你可以弃置一张方块手牌，对一名其他角色及其上下家各造成1点火属性伤害（不含你，故目标为你的邻座时只有两名角色受到伤害）。",
 
 		ccz_baihubaoyu: "白虎宝玉",
 		ccz_baihubaoyu_bg: "虎",
@@ -1290,9 +1368,9 @@ export default {
 
 		ccz_xuanwubaoyu: "玄武宝玉",
 		ccz_xuanwubaoyu_bg: "武",
-		ccz_xuanwubaoyu_info: "当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：点数1~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~12，不能使用锦囊牌；13则无效果。",
+		ccz_xuanwubaoyu_info: "每回合限一次，当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：判定结果为A~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~Q，不能使用锦囊牌；K则无效果。",
 		ccz_xuanwubaoyu_skill: "玄武宝玉",
-		ccz_xuanwubaoyu_skill_info: "当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：点数1~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~12，不能使用锦囊牌；13则无效果。",
+		ccz_xuanwubaoyu_skill_info: "每回合限一次，当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：判定结果为A~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~Q，不能使用锦囊牌；K则无效果。",
 		ccz_hunluan: "混乱",
 		ccz_hunluan_info: "你不能使用锦囊牌。",
 	},
