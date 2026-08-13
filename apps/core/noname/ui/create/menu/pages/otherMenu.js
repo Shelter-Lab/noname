@@ -257,6 +257,7 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 				var haveKeys = await db.getAssetKeys();
 				var changed = [];
 				var added = [];
+				var unknown = [];
 				for (var rel in hashes) {
 					var clean = rel.replace(/^\.\//, "");
 					if (isCode(clean)) continue;
@@ -267,11 +268,23 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 						added.push(rel);
 						continue;
 					}
-					if (baseline && baseline[pathname] && baseline[pathname] !== hashes[rel]) {
+					if (!baseline) {
+						continue; // 压根没有基线 → 由 missingBaseline 那条路统一处理
+					}
+					if (!baseline[pathname]) {
+						// 【库里有、基线里没记录 → 无从判断新旧,必须报出来】原来这一格是**静默跳过**的:
+						// 既不算新增(库里有)、又不参与比较(基线无),于是「建立基线之后才装进来的素材」
+						// 永远隐形 —— 曹操传那 25 张卡面就这么卡了一整轮。根因是下载器不写基线;
+						// 现在下载器会补记(见 library/init/index.js 的 baselineAdd),这里留作兜底:
+						// 老基线里缺的那些重下一次就自愈了。
+						unknown.push(rel);
+						continue;
+					}
+					if (baseline[pathname] !== hashes[rel]) {
 						changed.push(rel);
 					}
 				}
-				return { changed: changed, added: added, missingBaseline: !baseline, db: db, hashes: hashes };
+				return { changed: changed, added: added, unknown: unknown, missingBaseline: !baseline, db: db, hashes: hashes };
 			}
 
 			/** 下完之后把这批的哈希记进基线(只记真正写成功的) */
@@ -357,7 +370,9 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 						// 若已 waiting(装好没接管),催它跳过等待
 						if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
 						// 同样用 confirm:装完就闷头刷新会打断正在进行的对局
-						wantReload = confirm("发现新版本,正在下载…\n\n下载完成后自动刷新页面生效?(已下载的离线素材会保留)\n选「取消」则不刷新,下次打开时自然生效。");
+						// 【要提醒再点一次】代码和素材是两趟:这里 return 之后素材比对压根不跑,
+						// 而改立绘/卡面必然同时换构建戳 —— 用户只点一次就会以为"图没更新"。
+						wantReload = confirm("发现新版本,正在下载…\n\n下载完成后自动刷新页面生效?(已下载的离线素材会保留)\n选「取消」则不刷新,下次打开时自然生效。\n\n提示:刷新后请再点一次「检查更新」——立绘/卡面这类素材是第二趟才检查的。");
 						// 弹窗期间可能已经装完 activate 了(见上),补检一次,免得干等一个不会再来的事件
 						if (wantReload && (activated || incoming.state === "activated")) {
 							location.reload();
@@ -369,7 +384,7 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					// 【用 confirm 不用 alert】刷新会中断正在进行的对局,得让用户自己选时机;
 					// 且 reload 是从 SW 缓存读本地文件,不像冷启动那样慢。
 					if (latest && runningStamp && latest !== runningStamp) {
-						if (confirm("发现新版本 v" + latest + "(当前 v" + runningStamp + ")。\n新版已下载完成,刷新页面即可生效。\n\n现在刷新?(进行中的对局会中断)")) {
+						if (confirm("发现新版本 v" + latest + "(当前 v" + runningStamp + ")。\n新版已下载完成,刷新页面即可生效。\n\n现在刷新?(进行中的对局会中断)\n\n提示:刷新后请再点一次「检查更新」——立绘/卡面这类素材是第二趟才检查的。")) {
 							location.reload();
 						}
 						return;
@@ -434,11 +449,18 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 								return;
 							}
 							// 用户选择不建 → 继续走下面的常规提示
-						} else if (assetInfo.changed.length > 0) {
-							if (confirm("已是最新版本(v" + latest + ")。\n\n但有 " + assetInfo.changed.length + " 个素材有更新(立绘/卡面等内容变了,文件名没变)。\n\n现在下载?只下这 " + assetInfo.changed.length + " 个,不动其余素材。")) {
-								var r2 = await lib.init.downloadOfflineAssets(btn, { onlyList: assetInfo.changed, silent: true });
-								await updateBaseline(assetInfo.db, assetInfo.hashes, assetInfo.changed, r2 && r2.failed);
-								alert("已更新 " + ((r2 ? r2.done : 0)) + "/" + assetInfo.changed.length + " 个素材。" + (r2 && r2.failed.length ? "\n有 " + r2.failed.length + " 个没写进本地库,再点一次可补。" : "\n重新打开应用后生效。"));
+						} else if (assetInfo.changed.length + assetInfo.unknown.length > 0) {
+							// 【changed 和 unknown 一起下】unknown 是"库里有但基线没记录",本地到底新
+							// 还是旧无从判断 —— 而重下一次的代价只是几十 KB,换来基线补齐、以后能精确比对。
+							var todo = assetInfo.changed.concat(assetInfo.unknown);
+							var msg = "已是最新版本(v" + latest + ")。\n\n";
+							if (assetInfo.changed.length) msg += "· " + assetInfo.changed.length + " 个素材有更新(立绘/卡面内容变了,文件名没变)\n";
+							if (assetInfo.unknown.length) msg += "· " + assetInfo.unknown.length + " 个素材没有基线记录(建立基线之后才装进来的),无从判断新旧\n";
+							msg += "\n现在下载这 " + todo.length + " 个?不动其余素材。";
+							if (confirm(msg)) {
+								var r2 = await lib.init.downloadOfflineAssets(btn, { onlyList: todo, silent: true });
+								await updateBaseline(assetInfo.db, assetInfo.hashes, todo, r2 && r2.failed);
+								alert("已更新 " + (r2 ? r2.done : 0) + "/" + todo.length + " 个素材。" + (r2 && r2.failed.length ? "\n有 " + r2.failed.length + " 个没写进本地库,再点一次可补。" : "\n重新打开应用后生效。"));
 								return;
 							}
 						}

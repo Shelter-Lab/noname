@@ -129,6 +129,20 @@ export class LibInit {
 			// 失败(至今未修)。两万条里出几条几乎是必然,而丢掉的素材表现为「玩到那里才发现是剪影」,
 			// 极难事后定位 —— 所以攒起来在末尾统一重试一轮,仍失败的如实报数并写进库内日志。
 			const writeFailed = [];
+			// 【顺手把下到的素材记进基线】基线的语义是「本地实际持有的字节的哈希」,而下载器是素材
+			// 进库的唯一入口 —— 不在这里记,基线就只覆盖「建立基线那一刻库里有的东西」,之后新装的
+			// 素材会落进 inspectAssets 的盲区:库里有(不算新增)+ 基线无(不参与比较)→ **永远查不出
+			// 它旧了**。曹操传那 25 张卡面就是这么隐形的:包是后加的,基线是之前建的。
+			// 【只并进已存在的基线,不从零创建】没有基线时留空,好让「检查更新」照旧走完整的
+			// computeBaseline —— 写一份残缺基线会让 missingBaseline 变 false,反而把那条路堵死。
+			const baselineAdd = {};
+			const sha16 = async buf => {
+				const d = await crypto.subtle.digest("SHA-256", buf);
+				return [...new Uint8Array(d)]
+					.map(b => b.toString(16).padStart(2, "0"))
+					.join("")
+					.slice(0, 16);
+			};
 			for (let i = 0; i < pending.length; i += CONCURRENCY) {
 				if (lib.init._offlineDownloadAbort) break;
 				const batch = pending.slice(i, i + CONCURRENCY);
@@ -144,7 +158,8 @@ export class LibInit {
 							// 给的 Content-Type,拿不到才按扩展名猜。
 							const buf = await r.arrayBuffer();
 							const mime = db.guessMime(pathOf(url), r.headers.get("Content-Type") || "");
-							fetched.push({ path: pathOf(url), buf, mime });
+							// sha 只用来记基线,putAssets 只挑 buf/mime/len 存,多带这个字段不进库
+							fetched.push({ path: pathOf(url), buf, mime, sha: await sha16(buf) });
 							return;
 						}
 						// 代码(或素材库不可用时的一切)→ Cache Storage,行为与以前完全一致。
@@ -163,6 +178,10 @@ export class LibInit {
 				if (fetched.length) {
 					const { failed } = await db.putAssets(fetched);
 					if (failed.length) writeFailed.push(...fetched.filter(f => failed.includes(f.path)).map(f => f.path));
+					// 只记真正写进库的 —— 写失败的那条本地还是旧字节,基线里声称是新的就等于撒谎
+					for (const f of fetched) {
+						if (!failed.includes(f.path)) baselineAdd[f.path] = f.sha;
+					}
 				}
 				for (const res of results) {
 					if (res.status === "fulfilled") {
@@ -183,15 +202,35 @@ export class LibInit {
 					try {
 						const r = await fetch(p, { cache: "no-cache" });
 						if (r && r.status === 200) {
-							retry.push({ path: p, buf: await r.arrayBuffer(), mime: db.guessMime(p, r.headers.get("Content-Type") || "") });
+							const buf = await r.arrayBuffer();
+							retry.push({ path: p, buf, mime: db.guessMime(p, r.headers.get("Content-Type") || ""), sha: await sha16(buf) });
 						}
 					} catch {}
 				}
 				const { failed } = await db.putAssets(retry);
 				writeFailed.length = 0;
 				writeFailed.push(...failed);
+				for (const f of retry) {
+					if (!failed.includes(f.path)) baselineAdd[f.path] = f.sha;
+				}
 				if (failed.length) {
 					console.warn(`[素材库] 仍有 ${failed.length} 个写不进去`, failed.slice(0, 20));
+				}
+			}
+
+			// 把这一趟真正写进库的素材哈希并进基线。放在循环外(而不是每批一写)是因为基线是
+			// **单条整体覆盖**的记录,每批写一次等于反复序列化一个越来越大的对象;而中途被掐断
+			// (abort / 配额超限)也会走到这儿,已下到的那部分照样记得上。
+			if (db && Object.keys(baselineAdd).length && typeof db.getBaseline === "function") {
+				try {
+					const base = await db.getBaseline();
+					// 没有基线就不创建 —— 留给「检查更新」里的 computeBaseline 一次算全
+					if (base) {
+						Object.assign(base, baselineAdd);
+						await db.saveBaseline(base);
+					}
+				} catch (e) {
+					console.warn("[素材库] 基线更新失败(不影响本次下载):", e);
 				}
 			}
 
