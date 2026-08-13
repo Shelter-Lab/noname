@@ -84,29 +84,50 @@ export class LibInit {
 				return CODE_DIRS.includes(rel.slice(0, slash));
 			};
 			const pathOf = url => new URL(url, location.href).pathname;
-			// 【素材库加载失败要能退回老路】素材照样写 Cache Storage,慢但能用 ——
-			// 绝不能因为新仓库不可用就让「下载离线资源」整个失效。
+			// 【★ 素材库加载失败必须中止,绝不能静默回退 Cache Storage】
+			// 原来这里的注释写着「退回老路,慢但能用」——**那已经不成立了**。素材改存 IndexedDB
+			// 之后:① SW 读素材只查 IDB(pwa-sw.js 的 readAsset),`noname-pwa-v2` 那个桶
+			// **压根没人读**;② SW 的 activate 会把除 CODE_CACHE 以外的桶**整桶删掉**
+			// (pwa-sw.js:447)。所以回退路径写进去的 1.4 万个素材是纯白做:当场没人读,
+			// 下次换版还被删光 —— 而用户看到的是「下载完毕 15134/15134」,以为已经装好了。
+			// 实测就是这么发作的:下载报全部完成,体检却是「素材 0 个」,卡面永远更新不了。
+			// 故:拿不到素材库就如实报错让用户重试,宁可不下,也不假装下好了。
 			let db = null;
+			let dbError = null;
 			try {
 				db = await import(/* @vite-ignore */ `${rootURL}pwa-asset-db-esm.js`);
 			} catch (e) {
-				console.warn("素材库不可用,本次下载回退 Cache Storage:", e);
+				dbError = e;
+				console.warn("素材库不可用:", e);
 			}
-			const legacyAssetCache = db ? null : await caches.open("noname-pwa-v2");
+			if (!db) {
+				alert("素材库(IndexedDB)加载失败,本次不下载。\n\n原因:" + (dbError && dbError.message ? dbError.message : dbError) + "\n\n若强行下载,素材会写进一个没人读、且下次换版就被清空的地方 —— 白下 1GB。\n请检查网络后重试;若一直失败,可能是浏览器禁用了 IndexedDB(隐私模式等)。");
+				setText("下载离线资源");
+				lib.init._offlineDownloading = false;
+				return { done: 0, total: 0, failed: [], aborted: true, quota: false };
+			}
 
 			// 计算待下载(跳过已有)以支持续传。
 			// 【两个仓库的已有 key 要合起来算】否则代码那 700 多个或素材会被判成「未缓存」每次重下。
 			// 用 keys()/getAllKeys() 一次性取回做 Set 再比对 —— 避免逐个探测 1.4 万次把主线程搞崩
 			// (这是历史上「下载完再点会白屏」的成因,别改回逐条 match)。
 			const cachedSet = forced ? new Set() : new Set([...(await codeCache.keys())].map(r => new URL(r.url).pathname));
-			if (db && !forced) {
-				for (const k of await db.getAssetKeys()) cachedSet.add(k);
+			if (!forced) {
+				// 【读不到就中止,不能当成"库是空的"往下走】getAssetKeys 打不开时返回 null。
+				// 若把它当空集,pending 会变成全量、prune 会把整库当"清单外"删光,
+				// 而用户只看到一次"重新下载 1GB"——真正的故障(IDB 打不开)被完全掩盖。
+				const keys = await db.getAssetKeys();
+				if (!keys) {
+					alert("素材库打不开(IndexedDB 读取失败),本次不下载。\n\n请重新打开应用后再试;若持续失败,可能是浏览器禁用了 IndexedDB 或存储配额被清空。");
+					setText("下载离线资源");
+					lib.init._offlineDownloading = false;
+					return { done: 0, total: 0, failed: [], aborted: true, quota: false };
+				}
+				for (const k of keys) cachedSet.add(k);
 				// 【顺手清掉清单里已不存在的旧素材】改名/下架过的历史残留没有任何代码会清理,而它们
 				// 照样占条目数(实测缓存里比清单多约 6000 条)。以最新构建产物为唯一事实源。
 				const pruned = await db.pruneAssets(new Set(all.map(pathOf)));
 				if (pruned) console.log(`[素材库] 清掉 ${pruned} 条清单外的旧素材`);
-			} else if (!forced) {
-				for (const r of await legacyAssetCache.keys()) cachedSet.add(new URL(r.url).pathname);
 			}
 			const pending = forced ? all.slice() : all.filter(url => !cachedSet.has(pathOf(url)));
 			const total = all.length;

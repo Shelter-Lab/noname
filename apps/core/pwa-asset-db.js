@@ -259,18 +259,24 @@ async function computeBaseline(onProgress) {
 	return map;
 }
 
-/** 库里已有哪些 pathname —— 用 getAllKeys 一次取回,别逐条 get 探测 */
+// 【打不开时返回 null,绝不返回空 Set / 0】空和"读不到"是完全不同的故障:
+// 一个是"素材一张没下",另一个是 IDB 被禁用 / open 卡在 onblocked / 隐私模式 / 配额清空。
+// 两者都报 0,上层就永远分不清 —— 实测已经在这上面栽过一次:「下载显示 15134 全部完成,
+// 体检却说素材 0 个」,而 0 到底是真空还是读不到,当时无从判断,只能靠猜。
+// 调用方必须显式处理 null(见 otherMenu 的 inspectCache / inspectAssets)。
+
+/** 库里已有哪些 pathname —— 用 getAllKeys 一次取回,别逐条 get 探测。读不到返回 null */
 async function getAssetKeys() {
 	try {
 		const db = await openAssetDB();
 		const keys = await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
 		return new Set(keys.filter(k => !RESERVED_KEYS.has(k)));
 	} catch {
-		return new Set();
+		return null;
 	}
 }
 
-/** 库里有多少条(不含保留键) */
+/** 库里有多少条(不含保留键)。读不到返回 null */
 async function countAssets() {
 	try {
 		const db = await openAssetDB();
@@ -278,7 +284,7 @@ async function countAssets() {
 		const keys = await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
 		return n - keys.filter(k => RESERVED_KEYS.has(k)).length;
 	} catch {
-		return 0;
+		return null;
 	}
 }
 
@@ -291,6 +297,18 @@ async function pruneAssets(validPathSet) {
 		// 于是基线永远建不起来、每次检查更新都要重算一遍。
 		const dead = keys.filter(k => !validPathSet.has(k) && !RESERVED_KEYS.has(k));
 		if (!dead.length) return 0;
+		// 【★ 保险阀:要删掉一半以上就认定是 keep 集算错了,拒绝执行】
+		// prune 的前提是"清单是唯一事实源",可一旦 validPathSet 因任何原因残缺
+		// (清单请求拿到旧版本 / location 带了子路径导致 pathname 前缀不一致 /
+		//  清单里的相对路径与入库时的键编码不一致),这里就会**把整库清空**,
+		// 而调用方只会看到"下载离线资源需要重下 1.4 万个" —— 真正的故障被完全掩盖,
+		// 更糟的是基线是保留键、删不掉,于是"基线声称本地有这些图、实际一张都没有",
+		// 检查更新从此恒报"与线上一致"。实测就是这么发作的:素材 0 个而基线仍是满的。
+		// 正常运维下 dead 只有几千条里的百分之几(改名/下架的历史残留),超过一半必是 bug。
+		if (keys.length > 100 && dead.length > (keys.length - 1) * 0.5) {
+			console.error(`[素材库] prune 拒绝执行:要删 ${dead.length}/${keys.length} 条(超过一半)。` + `几乎必然是资源清单不完整或路径键不一致,已跳过以免清空整库。`);
+			return 0;
+		}
 		const tx = db.transaction(STORE, "readwrite");
 		const store = tx.objectStore(STORE);
 		for (const k of dead) store.delete(k);

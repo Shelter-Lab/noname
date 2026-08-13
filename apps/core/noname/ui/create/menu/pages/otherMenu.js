@@ -193,18 +193,26 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					// 不存在的桶是**创建**语义 —— 光是在这儿开一下就会把它重新建出来,
 					// 那 15.8 秒的隐患也跟着回来(见 pwa-sw.js 文件头)。
 					var codeKeys = await codeCache.keys();
-					var assets = 0;
+					// 【assets 用 null 表示"读不到",不要用 0】0 的含义是"库是空的",和"打不开"
+					// 是两种完全不同的故障,混成同一个数字就永远排查不出来(实测栽过)。
+					// 【顺带报基线条数】它和素材数一比就能立刻看出"基线声称有、实际没有"这种
+					// 撕裂状态 —— 那正是"检查更新恒报与线上一致"的成因。
+					var assets = null;
+					var baselineCount = null;
 					try {
 						var db = await import(/* @vite-ignore */ `${lib.assetURL}pwa-asset-db-esm.js`);
 						assets = await db.countAssets();
+						var b = await db.getBaseline();
+						baselineCount = b ? Object.keys(b).length : 0;
 					} catch (e) {
-						/* 素材库读不到就报 0,不影响版本体检本身 */
+						/* 素材库模块都加载不了 → 保持 null,如实报"读不到" */
 					}
 					return {
 						stamp: /^\d{10}$/.test(String(stampInCache || "")) ? stampInCache : null,
 						stale: Array.isArray(staleList) ? staleList.length : 0,
 						code: codeKeys.length,
 						assets: assets,
+						baseline: baselineCount,
 					};
 				} catch (e) {
 					return null;
@@ -255,6 +263,11 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 				};
 				var baseline = await db.getBaseline();
 				var haveKeys = await db.getAssetKeys();
+				// 读不到(≠空)就别往下比 —— 否则 14403 个素材会被全部误判成"本地压根没有",
+				// 报成"另有 14403 个未下载",把真正的故障(素材库打不开)完全掩盖掉。
+				if (!haveKeys) {
+					return { changed: [], added: [], unknown: [], missingBaseline: !baseline, dbUnreadable: true, db: db, hashes: hashes };
+				}
 				var changed = [];
 				var added = [];
 				var unknown = [];
@@ -468,10 +481,16 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 
 					// 一切正常。顺带把体检结果报出来 —— 以后再遇到"缓存好了怎么还慢",
 					// 这一行就能直接说明是不是缓存问题,不用再靠猜。
+					// 【素材库和基线撕裂时必须点出来】基线条数远大于素材数 = 基线声称本地有这些图、
+					// 实际一张都没有 → 比对恒报"一致",而用户看到的是"图永远不更新"。
+					var torn = health && health.assets !== null && health.baseline > 0 && health.baseline > health.assets * 2 + 100;
 					alert(
 						"已是最新版本(v" + latest + ")。" +
-							(health ? "\n\n本地缓存:代码 " + health.code + " 个(Cache Storage)+ 素材 " + health.assets + " 个(素材库)\n代码版本 v" + health.stamp + "(一致,启动直接读缓存)" : "") +
-							(assetInfo ? "\n素材:与线上一致" + (assetInfo.added.length ? "(另有 " + assetInfo.added.length + " 个未下载,可用「下载离线资源」补齐)" : "") : "")
+							(health
+								? "\n\n本地缓存:代码 " + health.code + " 个(Cache Storage)+ 素材 " + (health.assets === null ? "读不到(素材库打不开)" : health.assets + " 个") + (health.baseline === null ? "" : "，基线 " + health.baseline + " 条") + "\n代码版本 v" + health.stamp + "(一致,启动直接读缓存)"
+								: "") +
+							(torn ? "\n\n⚠ 素材库与基线不一致:基线记着 " + health.baseline + " 条,素材库里只有 " + health.assets + " 个。\n素材应该是被清空过(配额回收/清理网站数据)。请点「下载离线资源」重新装一遍,装完基线会自动对齐。" : "") +
+							(assetInfo ? (assetInfo.dbUnreadable ? "\n素材:无法比对(素材库打不开)" : "\n素材:与线上一致" + (assetInfo.added.length ? "(另有 " + assetInfo.added.length + " 个未下载,可用「下载离线资源」补齐)" : "")) : "")
 					);
 				} catch (e) {
 					console.error("检查更新失败:", e);
