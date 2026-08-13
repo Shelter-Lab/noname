@@ -8760,7 +8760,12 @@ export class Library {
 		langrensha: {
 			name: "狼人杀",
 			// 不在 config.json 的 stockmode 里，开场闪屏必须自带图，否则 OnloadSplash 会读到 undefined
-			splash: "image/splash/style1/brawl.jpg",
+			// 【为什么必须放 image/splash/style1/ 而不是直接指立绘】闪屏在启动路径上，而 build.ts
+			// 的核心清单只收录 listAssets("image/splash/style1")——image/character/ 不在核心里
+			// （靠「下载离线资源」或访问即缓存）。直接指立绘的话，没下过素材的用户第一次开这个
+			// 模式看到的是一块空白。本图 = 标准包 simayi.jpg 居中裁成 175×464（与其余 11 张同规格）；
+			// 原来复用的 brawl.jpg 是乱斗的图，跟本模式没关系。
+			splash: "image/splash/style1/langrensha.jpg",
 			// 六个身份（狼/民/预/巫/猎/觉孤）都没写 AI 决策，单机开局会卡在夜间刀人那步。
 			// 单机模式列表据此加灰显标注（startMenu.js 读它），配置栏里再给说明。
 			onlineOnly: true,
