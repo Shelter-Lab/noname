@@ -652,7 +652,8 @@ iOS 不许 SW 返回 redirected 响应(`sanitizeResponse`)、后台 install 被�
 | `apps/core/character/{bingshi,clan,huicui,mobile,newjiang,onlyOL,refresh,sb,sp,xianding}/character.js` | 给 35 个无立绘武将插 `img:` 字段(消除剪影),搜注释 `无自有立绘,复用同一人物的本体立绘` 可定位全部 | 跑 `node scripts/audit-character-images.cjs`,应报"零剪影"。**上游若补了真图,删掉我们的 `img:` 行**。详见 [docs/CHARACTER-IMAGES.md](./docs/CHARACTER-IMAGES.md) |
 | `apps/core/index.html` | ①`window.onerror`/`onunhandledrejection` 遇模块混版措辞让路给 `__pwaRepair()` ②缓存自修复 IIFE(约 200 行) | **上游若重排内联 `<script>` 块顺序,必须重查**:自修复靠"内联脚本已同步执行完、`entry.ts` 在文件末尾才加载"才保证 `__pwaRepair` 已定义;且属性式 `onerror` 若又排到自修复前面而没有让路判断,自修复会再次形同虚设(病因六第一层) |
 | `apps/core/pwa-sw.js` | install 主循环与重试轮对 `index.html` 额外 `cache.put("/")` | 导航分支的 key 匹配顺序若变,这里要跟着改(病因六第二层)。**别删** —— 删了改 `index.html` 的修复要开两次 App 才生效 |
-| 新增文件(不会冲突) | `pwa-sw.js`、`pwa-asset-db.js`、`manifest.webmanifest`、`peerAdapter.js`、`wrangler.jsonc`、`image/pwa/*`、本文档、README-PWA.md | 上游不会动,一般安全 |
+| `apps/core/game/package.js` | `card:` 里加了一行 `caocaozhuan: "曹操传"`(曹操传宝物卡牌包的登记处) | **上游动过这文件(近 200 commit 里 1 次)**,同一个 `card: {}` 块里两边都加包就会冲突 —— 那是好事,冲突会明确报出来,**两边都保留**即可。真正危险的是上游把整个 `card:` 块重写(比如改成扫目录),那样我们这行可能被静默吞掉,症状是「选项 → 卡牌」里曹操传消失。**合并后务必去菜单里确认这一项还在。** |
+| 新增文件(不会冲突) | `pwa-sw.js`、`pwa-asset-db.js`、`manifest.webmanifest`、`peerAdapter.js`、`wrangler.jsonc`、`image/pwa/*`、`card/caocaozhuan.js`、`image/card/ccz_*.png`、本文档、README-PWA.md | 上游不会动,一般安全。**卡牌包的卡 id 一律带 `ccz_` 前缀**:上游若哪天出同名卡也不会互相覆盖(覆盖是静默的,极难查) |
 
 **★ 2026-08-12 实测:上游那 20 个 commit 一个 PWA 文件都没碰。** 108 个改动文件全是内容
 (`audio/skill` 20、`image/character` 13、`character/*` 37、`typings`/`mode` 各 2),
