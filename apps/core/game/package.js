@@ -46,6 +46,7 @@ window.noname_package = {
 		zhulu: "逐鹿天下",
 		huodong: "活动卡牌",
 		xianxia: "线下卡牌",
+		caocaozhuan: "曹操传",
 	},
 	play: {
 		boss: "诸神降临",
