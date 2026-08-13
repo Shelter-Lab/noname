@@ -107,11 +107,13 @@ export default {
 		},
 
 		/**
-		 * 金火罐炮 —— 原作"中毒攻击"。poison 是本体原生支持的属性（lib.nature 里与
-		 * fire/thunder/ice/stab/kami 并列，有自己的配色与音效），不需要自己造判定。
-		 * 【毒的特殊之处】player.js 里 `if (next.hasNature("poison")) delete next._triggered`
-		 * —— 毒伤害**无法被"防止伤害"类效果拦住**（藤甲、仁王盾那种"此伤害无效"对它失效）。
-		 * 所以它天生穿防具，比火/雷都强，故攻击范围只给 1（炮车笨重，符合原作）。
+		 * 金火罐炮 —— 原作火器。攻击范围 5，与本体麒麟弓并列全场最远（炮的射程本该是最长一档）。
+		 * 【为什么不做"毒属性【杀】"】原先是 setNature(card, "poison")，查过本体后发现 poison 是个
+		 * "注册了却没人用"的钩子：lib.nature 里有它（优先级 50、绿色），但
+		 * lib.linked = ["fire","thunder","kami","ice"] 不含毒 → 铁索连环不传导；poisonDamage 这个
+		 * AI 标签全库只有 2 处命中、都是标签定义本身、无人消费；本体也没有任何卡牌或技能产生毒【杀】。
+		 * 净效果只剩"伤害数字变绿"，而因为它算作属性伤害，**反被本包自己的黄金铠完全挡住、
+		 * 被太平要术转成回血** —— 招牌效果对着自家两张牌是负面的。故改成实打实的延时掉血。
 		 */
 		ccz_jinhuoguanpao: {
 			fullskin: true,
@@ -662,16 +664,44 @@ export default {
 			},
 		},
 
-		// —— 金火罐炮：【杀】改毒属性 ——
+		// —— 金火罐炮：【杀】造成伤害后给目标留「灼伤」，其下个判定阶段判定梅花则掉 1 血 ——
 		ccz_jinhuoguanpao_skill: {
 			equipSkill: true,
-			trigger: { player: "useCard1" },
+			trigger: { source: "damageSource" },
 			forced: true,
 			filter(event, player) {
-				return event.card?.name === "sha" && !game.hasNature(event.card);
+				// 排除"被打的人是自己"：damageSource 的 event.player 是承受伤害者，
+				// 而【杀】打到自己也满足 —— 不排除会自己给自己上灼伤。
+				return event.card?.name === "sha" && event.player?.isIn() && event.player !== player;
 			},
 			async content(event, trigger, player) {
-				game.setNature(trigger.card, "poison");
+				// 【到期时机取 phaseJudgeAfter 而非 phaseAfter】效果要落在"下个判定阶段"。
+				// 若用 phaseAfter，当伤害发生在目标自己的回合内时（反伤、改变目标等），
+				// 标记会在该回合末就到期，而那时判定阶段早已过去 —— 效果直接蒸发。
+				// phaseJudgeAfter 则保证恰好结算一次：phaseJudgeBegin 触发判定，该阶段结束后移除。
+				trigger.player.addTempSkill("ccz_zhuoshang", { player: "phaseJudgeAfter" });
+			},
+		},
+		// 灼伤：被金火罐炮的【杀】烧过后留下的余烬。
+		// 【为什么叫灼伤而不是中毒】金火罐炮是火器，灼伤更贴；而本体已有两个"毒"：
+		// mode/boss.js 的 boss_zhongdu（"中毒"）与 character/tw 的恶泉（marktext "毒"），
+		// 二者都是"累积标记数、准备阶段按标记数掉血"，与本技能的"判定梅花掉 1 血"机制不同。
+		// 显示名相同并不冲突（id 才决定覆盖），但既然机制不一样，换个名字更不容易混。
+		// 本体没有任何叫"灼伤"的技能，不存在撞名。
+		ccz_zhuoshang: {
+			charlotte: true,
+			mark: true,
+			marktext: "灼",
+			intro: { content: "判定阶段开始时进行判定，若结果为梅花则流失1点体力" },
+			trigger: { player: "phaseJudgeBegin" },
+			forced: true,
+			async content(event, trigger, player) {
+				// 梅花占四分之一 → 25% 概率掉 1 血。
+				// 用 loseHp 而非 damage：余烬不该再触发受伤类技能，否则等于白送对手一次遇伤反击。
+				const { suit } = await player.judge(card => (get.suit(card) === "club" ? -1.5 : 0)).forResult();
+				if (suit === "club") {
+					await player.loseHp();
+				}
 			},
 		},
 
@@ -1129,9 +1159,11 @@ export default {
 
 		ccz_jinhuoguanpao: "金火罐炮",
 		ccz_jinhuoguanpao_bg: "炮",
-		ccz_jinhuoguanpao_info: "锁定技，你使用的普通【杀】改为毒属性【杀】。（毒属性计入属性伤害）",
+		ccz_jinhuoguanpao_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色获得“灼伤”标记：其下个判定阶段开始时进行判定，若结果为梅花则流失1点体力。",
 		ccz_jinhuoguanpao_skill: "金火罐炮",
-		ccz_jinhuoguanpao_skill_info: "锁定技，你使用的普通【杀】改为毒属性【杀】。",
+		ccz_jinhuoguanpao_skill_info: "锁定技，当你使用【杀】对其他角色造成伤害后，该角色获得“灼伤”标记：其下个判定阶段开始时进行判定，若结果为梅花则流失1点体力。",
+		ccz_zhuoshang: "灼伤",
+		ccz_zhuoshang_info: "判定阶段开始时，你进行一次判定，若结果为梅花则流失1点体力。",
 
 		ccz_wuhuoshenyanshan: "五火神焰扇",
 		ccz_wuhuoshenyanshan_bg: "焰",
