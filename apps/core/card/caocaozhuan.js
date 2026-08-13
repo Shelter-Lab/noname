@@ -117,6 +117,8 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip1",
+			// 攻击范围 5 —— 与本体麒麟弓并列全场最远。炮的射程本就该是最长的一档
+			distance: { attackFrom: -4 },
 			ai: { basic: { equipValue: 4 } },
 			skills: ["ccz_jinhuoguanpao_skill"],
 		},
@@ -132,7 +134,7 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip1",
-			distance: { attackFrom: -1 },
+			distance: { attackFrom: -3 },
 			ai: { basic: { equipValue: 3 } },
 			skills: ["ccz_wuhuoshenyanshan_skill"],
 		},
@@ -1127,7 +1129,7 @@ export default {
 
 		ccz_jinhuoguanpao: "金火罐炮",
 		ccz_jinhuoguanpao_bg: "炮",
-		ccz_jinhuoguanpao_info: "锁定技，你使用的普通【杀】改为毒属性【杀】。（毒属性伤害无法被“防止伤害”类效果抵消）",
+		ccz_jinhuoguanpao_info: "锁定技，你使用的普通【杀】改为毒属性【杀】。（毒属性计入属性伤害）",
 		ccz_jinhuoguanpao_skill: "金火罐炮",
 		ccz_jinhuoguanpao_skill_info: "锁定技，你使用的普通【杀】改为毒属性【杀】。",
 
