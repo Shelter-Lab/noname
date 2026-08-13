@@ -17,3 +17,5 @@ package-lock.json
 # Windows
 ehthumbs.db
 Thumbs.db
+# 扩展分发包产物（scripts/build-ccz-extension.mjs 随时可重新生成，不入库）
+dist-ext
