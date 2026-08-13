@@ -21,6 +21,20 @@ import { lib, game, get, _status } from "noname";
  * 而是"他的真实阵营能透出多少"。真正的逐人信念推理是另一个量级，本次不做。
  */
 
+/**
+ * 读模式配置，一份逻辑同时服务联机和单机。
+ *
+ * 联机的房间配置在 lib.configOL 里，键名是 connect_xxx 去掉前缀后的样子
+ * （switchMode 里 `lib.configOL[i.slice(8)] = get.config(i)`）；单机则直接 get.config(键名)，
+ * 且 lib.configOL 在单机是 undefined（Library.prototype.configOL = undefined），不能瞎点。
+ * 所以只要 library/index.js 里两边的键名对齐，这里传同一个字符串即可。
+ *
+ * 放在 ai.js 而不是 index.js：index.js 要 import 本模块，反向 import 会成环。
+ */
+export function swConfig(key) {
+	return _status.connectMode ? lib.configOL[key] : get.config(key);
+}
+
 /** 阵营两两之间的基础态度。敌人权重故意大于队友：漏掉一头狼直接输，打错一个好人只是少个帮手 */
 const CAMP_ATTITUDE = {
 	lang: { lang: 6, ren: -6, npc: -2 },
@@ -97,7 +111,7 @@ function guessCamp(from, to) {
 function trueAttitude(from, to) {
 	let att = campAttitude(from.getCamp(), to.getCamp());
 	// 屠边模式下神职或平民任一类全灭即狼胜，所以狼优先啃只剩一两个人的那一类
-	if (att < 0 && from.getCamp() === "lang" && lib.configOL.langrensha_victoryMode != "tucheng") {
+	if (att < 0 && from.getCamp() === "lang" && swConfig("langrensha_victoryMode") != "tucheng") {
 		const sub = to.getCamp(true);
 		if ((sub === "shen" || sub === "ren") && get.campPopulation(sub, true) <= 2) {
 			att -= 2;

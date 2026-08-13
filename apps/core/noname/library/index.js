@@ -8766,9 +8766,8 @@ export class Library {
 			// 模式看到的是一块空白。本图 = 标准包 simayi.jpg 居中裁成 175×464（与其余 11 张同规格）；
 			// 原来复用的 brawl.jpg 是乱斗的图，跟本模式没关系。
 			splash: "image/splash/style1/langrensha.jpg",
-			// 六个身份（狼/民/预/巫/猎/觉孤）都没写 AI 决策，单机开局会卡在夜间刀人那步。
-			// 单机模式列表据此加灰显标注（startMenu.js 读它），配置栏里再给说明。
-			onlineOnly: true,
+			// 曾经这里是 onlineOnly: true（单机列表灰显"仅联机"）。现在夜间六个身份都有 AI
+			// （mode/langrensha/config/ai.js），单机的分身份+选将也补齐了，故解除标注。
 			// 两项共用的展开/收起。挂在 mode 上而不是各写一份，免得改一处漏一处。
 			// 【为什么返回值要留意】clickToggle 里 `onclick(...) === false` 会把 .on 状态回滚，
 			// 所以这里绝不能返回 false，否则点一下就被自己撤销、看起来像没反应。
@@ -8811,7 +8810,7 @@ export class Library {
 					},
 					frequent: true,
 					restart: true,
-					intro: "本模式没有AI，所有座位都必须是真人。<br>身份表为固定顺序，少于8人会从尾部截断导致板子不完整（如4人只有狼/民/民/预言家，没有女巫和猎人），建议按板子选8人或10人。",
+					intro: "真人不够的座位由 AI 托管。<br>身份表为固定顺序，少于8人会从尾部截断导致板子不完整（如4人只有狼/民/民/预言家，没有女巫和猎人），建议按板子选8人或10人。",
 				},
 				connect_langrensha_banzi: {
 					name: "游玩板子",
@@ -8877,38 +8876,96 @@ export class Library {
 					},
 				},
 			},
-			// 死亡流程会在广播回调里读 lib.mode[mode].config.dierestart（每端都读），缺了会抛错
-			// 另外这里的配置项就是单机菜单右侧栏（startMenu.js 读 info.config），
-			// 本模式六个身份（狼/民/预/巫/猎/觉孤）一个 AI 决策都没写，单机必然卡死在
-			// 夜间刀人/查验/用药那步。故不摆可玩的配置项，只摆两条说明，让人在点「启」之前
-			// 就知道要去联机。真正的兜底拦截仍在 mode/langrensha/index.js 的 start 里。
+			// 这里的配置项就是单机菜单右侧栏（startMenu.js 读 info.config）。键名要与 connect 那边
+			// 去掉 connect_ 前缀后一致：联机是 lib.configOL[i.slice(8)]=get.config(i)，单机直接
+			// get.config(键名)，模式代码里的 swConfig() 靠这个对齐才能一份逻辑跑两边。
 			config: {
 				// 【config 里每一项都必须是配置对象，不能是裸值】这儿曾写过 `dierestart: false`，
 				// 直接把启动链搞崩：startMenu.js:215 遍历 info.config 时对每项 get.copy(x) 再
 				// cfg._name = j —— get.copy(false) 返回 false，给布尔赋属性就抛
 				// "Cannot create property '_name' on boolean 'false'"，启动链被打断，
 				// 撞 30s 看门狗弹「游戏似乎未正常载入，是否重置」。
-				// identity/guozhan 的 dierestart 都是完整对象({name,init,onclick})；本模式仅联机可玩，
-				// 单机的「死亡后显示重来」用不上，故直接不写这一项。
-				//
-				// 【这两项是说明文字，不是开关 —— 必须带 clear:true】
+				langrensha_mode: {
+					name: "游戏模式",
+					frequent: true,
+					init: "normal",
+					item: {
+						normal: "标准模式",
+					},
+					restart: true,
+					intro: "模式的选择",
+				},
+				player_number: {
+					name: "游戏人数",
+					init: "8",
+					// 复用身份模式那份 2~10 人的列表，与 connect_player_number 的取法一致
+					get item() {
+						return lib.mode.identity.config.player_number.item;
+					},
+					frequent: true,
+					restart: true,
+					intro: "除自己以外的座位都由 AI 托管。<br>身份表为固定顺序，少于8人会从尾部截断导致板子不完整（如4人只有狼/民/民/预言家，没有女巫和猎人），建议按板子选8人或10人。",
+				},
+				langrensha_banzi: {
+					name: "游玩板子",
+					frequent: true,
+					init: "normal",
+					item: {
+						normal: "普通8人（屠边）",
+						juegu: "8-10人觉醒孤独少女（屠城）",
+					},
+					restart: true,
+				},
+				langrensha_victoryMode: {
+					name: "游戏结束方式",
+					frequent: true,
+					init: "tubian",
+					item: {
+						tubian: "屠边",
+						tucheng: "屠城",
+					},
+					restart: true,
+					intro: "屠边：神/民一类阵营全部阵亡狼人获胜。屠城：好人全部阵亡狼人获胜。",
+				},
+				langrensha_listNum: {
+					name: "玩家选将框",
+					frequent: true,
+					init: "20",
+					item: {
+						10: "十个",
+						20: "二十个",
+						30: "三十个",
+						40: "四十个",
+						50: "五十个",
+					},
+					restart: true,
+					intro: "选将的时候每个人多少个选将框<br>务必计算好将池数量是足够的（人数 × 选将框 不能超过可用武将数）！",
+				},
+				dierestart: {
+					name: "死亡后显示重来",
+					init: true,
+					onclick(bool) {
+						game.saveConfig("dierestart", bool, this._link.config.mode);
+						if (get.config("dierestart") && get.mode() == "langrensha") {
+							if (!ui.restart && game.me.isDead() && !_status.connectMode) {
+								ui.restart = ui.create.control("restart", game.reload);
+							}
+						} else if (ui.restart) {
+							ui.restart.close();
+							delete ui.restart;
+						}
+					},
+				},
+				// 【这项是说明文字，不是开关 —— 必须带 clear:true】
 				// 不带 clear 会走 createConfig 的默认分支，而那条分支对"没有 item/range/input"的项
-				// 一律画成布尔 toggle：于是两条纯说明被渲染成两个可拨的开关，用户以为拨了会改规则，
+				// 一律画成布尔 toggle：纯说明会被渲染成一个可拨的开关，用户以为拨了会改规则，
 				// 实际上没有 init 也没有 onclick，拨动只是往 localStorage 写一个没人读的键。
-				// 上一版就是这样，误导了人（"打开后和不打开有什么差别"——答案是没差别）。
+				// 早先版本就是这样，误导过人（"打开后和不打开有什么差别"——答案是没差别）。
 				// clear:true 走 menu/index.js 的另一条分支：只画一行文字 + 挂 clickToggle，
 				// 由 onclick 收到展开状态、自己插/删说明块 —— 即"点一下展开详情"，
 				// 与「网页扩展」里那个详细说明按钮同一个交互。
 				// 代价是 clear 分支跳过 lib.setIntro（长按弹框没了），故改由点击展开，信息不丢。
-				langrensha_onlyol_notice: {
-					name: "⚠️ 本模式仅联机可玩（点此展开）",
-					clear: true,
-					intro: "狼人杀的分身份和选将流程只有联机版实现，单机开局会中断。<br><br><b>正确玩法</b>：返回主菜单点「联机」→ 创建房间或用房间号加入 → 在房间内选择「狼人杀」。<br><br>房间人数设 8 或 10，真人不够的座位由 AI 托管（AI 会推阵营、狼会集火、预言家会用验人结果）。板子按人数固定，人数不足会从尾部截断导致板子不完整。",
-					onclick: function (opened) {
-						return lib.mode.langrensha.toggleNotice(this, opened);
-					},
-				},
-				langrensha_onlyol_rule: {
+				langrensha_rule: {
 					name: "板子与规则（点此展开）",
 					clear: true,
 					intro: getLangrenshaRule,

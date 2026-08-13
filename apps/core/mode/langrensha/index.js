@@ -2,7 +2,7 @@ import { lib, game, ui, get, ai, _status } from "noname";
 
 import skill from "./config/skill.js";
 import translate from "./config/translate.js";
-import { rawAttitude, logAi } from "./config/ai.js";
+import { rawAttitude, logAi, swConfig } from "./config/ai.js";
 
 export const type = "mode";
 
@@ -342,10 +342,10 @@ function swInstallLangrensha() {
 	ui.click.chatTeam = clickChatTeam;
 }
 
-/** 每人的选将框数量，读 connect_langrensha_listNum */
+/** 每人的选将框数量，读 langrensha_listNum */
 function getSelectNum() {
 	const mode = get.mode();
-	let num = lib.configOL[mode + "_listNum"] || 5;
+	let num = swConfig(mode + "_listNum") || 5;
 	if (num === "normal" || num === "dianjiang") {
 		return 5;
 	}
@@ -412,42 +412,11 @@ export default () => ({
 	start: [
 		async (event, trigger, player) => {
 			if (!_status.connectMode) {
-				// 单机还没通：分身份和选将走的是 chooseCharacterOL → game.me.chooseButtonOL，
-				// 加上 game.randomMapOL 依赖 lib.node.clients / lib.configOL，这套全是联机专用的，
-				// 单机下这两样都没有，开局就断。要解锁得另写一条单机的分身份+选将路径
-				// （AI 已经有了，见 config/ai.js，不再是拦路的那块）。
-				// 单机菜单里已经摆了「仅联机可玩」的说明（library/index.js 的 langrensha_onlyol_notice），
-				// 这里是兜底：万一有人绕过菜单直接进来（老存档的 mode 记着 langrensha、
-				// 或 localStorage 的 directstart 残留），给一个能看懂的弹窗而不是卡死。
-				//
-				// 这条路仍然要 reload（得回主菜单，没有不重载的走法），但两处比原来强：
-				// ①先把 mode 落回 identity 并清掉 directstart，否则重载后又直奔狼人杀，
-				//   变成"弹窗→重载→弹窗"的循环（原来的 alert 版就有这个毛病）；
-				// ②用游戏内 dialog 而不是原生 alert —— alert 在 iOS standalone 上阻塞主线程，
-				//   且样式突兀。等用户点了按钮才 reload。
-				game.saveConfig("mode", "identity");
-				localStorage.removeItem(`${lib.configprefix}directstart`);
-				// 弹窗写法照抄 game/index.js:9836 那套现成范式（open → pause → control → onfree），
-				// 少了 onfree 的话点按钮不响应
-				await new Promise(resolve => {
-					const dialog = ui.create.dialog(
-						`<div class="text center"><b>狼人杀仅联机模式可玩</b></div>` +
-							`<div class="text">本模式的分身份和选将流程只有联机版，单机开局会中断。</div>` +
-							`<div class="text">请返回主菜单点「联机」，创建房间或用房间号加入，在房间内选择「狼人杀」。房间人数设 8 或 10，真人不够的座位由 AI 托管。</div>`,
-						"hidden"
-					);
-					dialog.open();
-					game.pause();
-					const control = ui.create.control("返回主菜单", () => {
-						dialog.close();
-						control.close();
-						game.resume();
-						resolve();
-					});
-					lib.init.onfree();
-				});
-				game.reload();
-				event.finish();
+				// 单机：照身份模式的做法自己摆场（identity.js:61-71 的 game.prepareArena()），
+				// 人数由 ui.create.players → get.playerNumber() 读单机的 player_number 配置。
+				// 不能走 game.randomMapOL()：那个要 lib.node.clients 排座位、还读 lib.configOL。
+				game.prepareArena();
+				game.delay();
 				return;
 			}
 			game.waitForPlayer(function () {
@@ -455,8 +424,8 @@ export default () => ({
 			});
 		},
 		async (event, trigger, player) => {
-			_status.mode = lib.configOL.langrensha_mode;
-			if (lib.configOL.number < 2) {
+			_status.mode = swConfig("langrensha_mode");
+			if (_status.connectMode && lib.configOL.number < 2) {
 				lib.configOL.number = 2;
 			}
 			game.broadcastAll(installStyle, identityCSS);
@@ -468,12 +437,30 @@ export default () => ({
 			if (!_status.postReconnect.langrenshaInstall) {
 				_status.postReconnect.langrenshaInstall = [installClientMembers];
 			}
-			// 狼队频道：客户端把消息发给主机，主机再分发给所有狼人
-			lib.message.server.chatTeam = serverChatTeam;
+			// 狼队频道：客户端把消息发给主机，主机再分发给所有狼人。单机没有客户端，不用装
+			if (_status.connectMode) {
+				lib.message.server.chatTeam = serverChatTeam;
+			}
 		},
 		async (event, trigger, player) => {
 			game.broadcastAll(clientCreateInfoUI);
-			game.randomMapOL();
+			if (_status.connectMode) {
+				// randomMapOL 里排完座位就会调 game.chooseCharacterOL()
+				game.randomMapOL();
+				return;
+			}
+			// 单机：把 randomMapOL 里跟客户端无关的那部分自己补上。
+			// lib.playerOL 只在 game.createServer()/客户端 init 里初始化过，单机是 undefined，
+			// 而 chooseButtonOL 按 playerid 索引结果、chooseCharacterOL 又要靠 lib.playerOL[id]
+			// 反查回玩家（还有 getState/updateState），所以这两样必须先备好。
+			// player.getId() 在 connectMode 下会直接 return，且它填的是 game.playerMap，
+			// 不是这里要的 lib.playerOL，故手动发号。
+			lib.playerOL ??= {};
+			for (const current of game.players) {
+				current.playerid ??= get.id();
+				lib.playerOL[current.playerid] = current;
+			}
+			game.chooseCharacterOL();
 		},
 		async (event, trigger, player) => {
 			for (let i = 0; i < game.players.length; i++) {
@@ -530,7 +517,9 @@ export default () => ({
 			game.gameDraw(event.beginner, function (player) {
 				return 4;
 			});
-			if (lib.configOL.change_card) {
+			// 换牌是联机房的选项，单机菜单里没有（身份模式 identity.js:466 也是这么门的），
+			// 而 lib.configOL 在单机是 undefined，不加这道门会直接抛
+			if (_status.connectMode && lib.configOL.change_card) {
 				game.replaceHandcards(game.players.slice(0));
 			}
 		},
@@ -576,7 +565,7 @@ export default () => ({
 		checkOnlineResult(player) {
 			if (get.campPopulation("lang") == 0) {
 				return player.getCamp() == "ren";
-			} else if (lib.configOL.langrensha_victoryMode == "tucheng" ? get.campPopulation("ren") == 0 : get.campPopulation("ren", true) == 0 || get.campPopulation("shen", true) == 0) {
+			} else if (swConfig("langrensha_victoryMode") == "tucheng" ? get.campPopulation("ren") == 0 : get.campPopulation("ren", true) == 0 || get.campPopulation("shen", true) == 0) {
 				return player.isLang();
 			}
 			return false;
@@ -588,7 +577,7 @@ export default () => ({
 				return;
 			}
 			// 屠城：好人全灭才算狼胜；屠边：神或民一类全灭即算狼胜
-			if (lib.configOL.langrensha_victoryMode == "tucheng") {
+			if (swConfig("langrensha_victoryMode") == "tucheng") {
 				if (get.campPopulation("lang") > 0 && get.campPopulation("ren") > 0) {
 					return;
 				}
@@ -608,7 +597,7 @@ export default () => ({
 				} else {
 					game.over(false);
 				}
-			} else if (lib.configOL.langrensha_victoryMode == "tucheng" ? get.campPopulation("ren") == 0 : get.campPopulation("ren", true) == 0 || get.campPopulation("shen", true) == 0) {
+			} else if (swConfig("langrensha_victoryMode") == "tucheng" ? get.campPopulation("ren") == 0 : get.campPopulation("ren", true) == 0 || get.campPopulation("shen", true) == 0) {
 				if (me.getCamp() == "ren") {
 					game.over(false);
 				} else if (me.isLang()) {
@@ -667,16 +656,19 @@ export default () => ({
 			}
 		},
 		getRoomInfo(uiintro) {
-			uiintro.add('<div class="text chat">游戏模式：' + (lib.configOL.langrensha_mode == "normal" ? "标准模式" : "无限火力"));
+			uiintro.add('<div class="text chat">游戏模式：' + (swConfig("langrensha_mode") == "normal" ? "标准模式" : "无限火力"));
 			uiintro.add(getRule());
 		},
-		// 分身份 + 各人自选武将。核心的 randomMapOL 直接调 game.chooseCharacterOL
+		// 分身份 + 各人自选武将。联机由核心的 randomMapOL 末尾直接调进来，单机由 start 手动调。
+		// 名字留着 OL 后缀是因为 randomMapOL 硬编码了这个方法名，改名会断掉联机那条路；
+		// 内部走 chooseButtonOL，而它本身就有 !_status.connectMode 分支（content.ts:7633），
+		// 单机下会顺序跑每个人的 chooseButton，AI 座位由默认 ai(()=>1) 取候选列表第一个。
 		chooseCharacterOL() {
 			const next = game.createEvent("chooseCharacter");
 			next.setContent(async event => {
 				const playersAll = game.players.slice(0);
 				let identityList = [];
-				switch (lib.configOL.langrensha_banzi) {
+				switch (swConfig("langrensha_banzi")) {
 					case "juegu":
 						identityList = ["lang", "pingmin", "jx_gudushaonv", "yvyanjia", "langwang", "nvwu", "lang", "lieren", "pingmin", "bailang"];
 						break;
@@ -737,12 +729,20 @@ export default () => ({
 				event.list2 = [];
 
 				const libCharacter = {};
-				for (let i = 0; i < lib.configOL.characterPack.length; i++) {
-					const pack = lib.characterPack[lib.configOL.characterPack[i]];
-					for (const j in pack) {
-						if (lib.character[j]) {
-							libCharacter[j] = lib.character[j];
+				if (_status.connectMode) {
+					// 联机：主机的 lib.character 可能含房间没开的包，只能按房间的 characterPack 取
+					for (let i = 0; i < lib.configOL.characterPack.length; i++) {
+						const pack = lib.characterPack[lib.configOL.characterPack[i]];
+						for (const j in pack) {
+							if (lib.character[j]) {
+								libCharacter[j] = lib.character[j];
+							}
 						}
+					}
+				} else {
+					// 单机：lib.character 本身就已经是"启用的包"，直接整个拿（identity.js:2179 同做法）
+					for (const j in lib.character) {
+						libCharacter[j] = lib.character[j];
 					}
 				}
 				for (const i in lib.characterReplace) {
@@ -795,14 +795,21 @@ export default () => ({
 				_status.characterlist = list4.slice(0);
 
 				const chooseList = [];
-				const selectButton = lib.configOL.double_character ? 2 : 1;
-				const listNum = getSelectNum();
+				const selectButton = swConfig("double_character") ? 2 : 1;
+				// 选将框数要卡住上限：每人 randomRemove(listNum) 是从同一个池里往外掏，
+				// listNum × 人数 超过池子的话后面几个人会拿到空列表 → 选不出东西 →
+				// result 没有 links → 下面 result[i].links 取下标直接抛。
+				// 默认 20 框 × 10 人 = 200，禁将开得多或只启用少数武将包时够得着这条线
+				const listNum = Math.max(1, Math.min(getSelectNum(), Math.floor(event.list.length / playersAll.length)));
 
-				// 选将期间临时把出牌时限改成选将时限，选完还原
-				event.useTime = lib.configOL.choose_timeout;
-				game.broadcastAll(time => {
-					lib.configOL.choose_timeout = time;
-				}, parseInt(lib.configOL.chooseCharacter_moreTime));
+				// 选将期间临时把出牌时限改成选将时限，选完还原。
+				// 单机没有 configOL 也没有超时机制（chooseButton 就 game.pause() 等点击），跳过
+				if (_status.connectMode) {
+					event.useTime = lib.configOL.choose_timeout;
+					game.broadcastAll(time => {
+						lib.configOL.choose_timeout = time;
+					}, parseInt(lib.configOL.chooseCharacter_moreTime));
+				}
 
 				for (let i = 0; i < playersAll.length; i++) {
 					const identity = playersAll[i].identity;
@@ -811,7 +818,8 @@ export default () => ({
 				}
 				const result = await game.me
 					.chooseButtonOL(chooseList, function (player, result) {
-						if (game.online || player == game.me) {
+						// 没选出来的情况留给下面的兜底统一处理，别在回调里抛
+						if ((game.online || player == game.me) && result && result.links) {
 							player.init(result.links[0], result.links[1]);
 						}
 					})
@@ -826,8 +834,9 @@ export default () => ({
 					}
 				}
 				for (const i in result) {
-					if (result[i] == "ai") {
-						// 超时未选：随机顶一个
+					// "ai" 是超时未选；没有 links 则是压根没选出来（池子被掏空、或中途断线），
+					// 两种都当"随机顶一个"处理，不然下面 result[i][0] 会抛
+					if (result[i] == "ai" || !result[i] || !result[i].links) {
 						result[i] = event.list2.randomRemove(selectButton);
 						for (let j = 0; j < result[i].length; j++) {
 							const listx = lib.characterReplace[result[i][j]];
@@ -927,9 +936,11 @@ export default () => ({
 					_status.characterlist.remove(game.players[i].name2);
 				}
 
-				game.broadcastAll(time => {
-					lib.configOL.choose_timeout = time;
-				}, event.useTime);
+				if (_status.connectMode) {
+					game.broadcastAll(time => {
+						lib.configOL.choose_timeout = time;
+					}, event.useTime);
+				}
 
 				game.broadcastAll(() => {
 					setTimeout(function () {
