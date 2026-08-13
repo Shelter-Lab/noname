@@ -9947,8 +9947,32 @@ export class Player extends HTMLDivElement {
 					player.showTimer(time);
 				}
 				lib.node.torespondtimeout[this.playerid] = setTimeout(function () {
+					// 超时改为转托管，不再切断连接。
+					//
+					// 原来是 unwait("ai") + player.ws.ws.close()。那个 close 不是惩罚，是一种
+					// "重同步"手段——客户端 onclose 会 reload 页面、再按 reconnect_info 自动
+					// 重连拿一份完整快照。代价是玩家被踢出去刷一次页面，在并行限时的场景里
+					// 特别容易踩到（狼人杀夜间 8 人同时选目标，还要用队内聊天商量，一慢就被踹）。
+					//
+					// 现在让客户端执行 ui.click.auto("forced")，也就是玩家自己点「托管」按钮
+					// 那条路（ui/click/index.js 的 auto）：它在 _status.imchoosing && _status.paused
+					// 时会走 switchToAuto/redo + game.resume()，把还开着的选择对话框自动答掉，
+					// 不会留下卡住的 UI。"forced" 是为了跳过按钮隐藏时的早退判断；
+					// 那里另一个早退条件 _status.paused2 在联机客户端上不可能成立
+					// （game.pause2() 只在 !connectMode 时置位，而客户端是 connectMode）。
+					//
+					// 昵称交给客户端回发的 "auto" 去改（lib.message.server.auto 会加 " - 托管"
+					// 后缀并广播），这里不自己改，否则会叠成"昵称 - 托管 - 托管"。
+					//
+					// isAuto 先置上再 unwait：置上之后 player.isOnline() 即为 false，unwait 引发的
+					// 后续流程不会再给这个座位发选择请求（改由主机 AI 代打），本超时也不会二次触发。
+					// 客户端真的断网时 player.send 是空操作（只判 ws 存活），主机侧照样接管，
+					// 与原来的结果一致，只是少了一次强制刷新。
+					player.isAuto = true;
+					player.send(function () {
+						ui.click.auto("forced");
+					});
 					player.unwait("ai");
-					player.ws.ws.close();
 				}, time + 5000);
 			}
 		}
