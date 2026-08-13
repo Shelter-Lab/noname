@@ -418,6 +418,14 @@ export default () => ({
 				// 不能走 game.randomMapOL()：那个要 lib.node.clients 排座位、还读 lib.configOL。
 				game.prepareArena();
 				game.delay();
+				// 【这一句删不得】lib.onfree 是个"等游戏就绪再执行"的队列，选项菜单的构建
+				// （ui/create/index.js:3139 的 ui.create.menu()）和牌堆卡片实体的创建
+				// （同文件 :3866 的 cardsAsync）都排在里面，只有 lib.init.onfree() 会把它排空。
+				// 自动兜底只给扩展模式（game/index.js:8041 判 fromextension），内置模式必须自己调：
+				// 身份模式是在后面的步骤里调 game.showChangeLog()（其末尾即 lib.init.onfree()）
+				// 或直接调 onfree。少了它的后果不是"少个菜单"——选项点不动、切不了模式、
+				// 牌堆是空的，而且 window.resetGameTimeout 不会被清，30 秒后弹「是否重置」。
+				lib.init.onfree();
 				return;
 			}
 			game.waitForPlayer(function () {
