@@ -23,7 +23,19 @@ export default {
 			// 每轮清空。只记 AI 狼的选择：真人是并行秘密选的，主机在他响应前拿不到，
 			// 而且把真人的秘密选择透给 AI 队友也不合适。
 			_status.swNightPlan = {};
-			_status.swNightPlanText = "";
+			// 狼刀提示要带的队内信息，只推给狼（见 ① 之后那段推送）。
+			// 【为什么在主机侧算总量、不让客户端现算】狼死后会把每轮狼刀转移给队友
+			// （swState.langdao 变动），而客户端的 swState 只在 game.syncState() 时同步一次，
+			// 客户端自己算会用过期数字。主机侧的 swState 才是权威。
+			// 只统计 isLang() 的存活狼 —— 正好把隐狼排除在外，而狼队本来就看不见隐狼，
+			// 所以这个总量恰好等于"狼队自己以为的总量"，不构成作弊。
+			let swTeamDao = 0;
+			for (const one of game.players) {
+				if (one.isLang()) {
+					swTeamDao += one?.swState?.langdao || 0;
+				}
+			}
+			_status.swNightPlanText = swTeamDao ? `全队本轮共 ${swTeamDao} 点` : "";
 			const targets = game.players.slice(0).sortBySeat();
 			let answer_result = [[], []];
 			let humans = targets.filter(current => current === game.me || current.isOnline()); // 真人
@@ -61,10 +73,10 @@ export default {
 							}
 							return score;
 						});
-						// 提示里带上 AI 队友已经选好的刀（_status.swNightPlanText，只推给狼），
-						// 免得真人狼盲选：要么撞在同一个满血目标上浪费，要么该集火时没集火。
-						// 气泡会消失，但队内聊天里也报了一份，翻记录能查。
-						next.set("prompt2", "选择一名角色，使其流失" + (current.swState.langdao || 1) + "点体力。（不触发技能）" + (_status.swNightPlanText ? '<br><span class="bluetext">队友已选：' + _status.swNightPlanText + "</span>" : ""));
+						// 提示里带上队内信息（_status.swNightPlanText，只推给狼，自带"全队本轮共 N 点｜
+						// 队友已选：…"的标签）：免得真人狼盲选 —— 要么撞在同一个满血目标上浪费，
+						// 要么该集火收人头时没集火。气泡会消失，但队内聊天里也报了一份，翻记录能查。
+						next.set("prompt2", "选择一名角色，使其流失" + (current.swState.langdao || 1) + "点体力。（不触发技能）" + (_status.swNightPlanText ? '<br><span class="bluetext">' + _status.swNightPlanText + "</span>" : ""));
 						next.set("_global_waiting", true);
 						break;
 					case "nvwu":
@@ -144,6 +156,19 @@ export default {
 						break;
 					case "yvyanjia":
 						next = current.chooseTarget(get.prompt2("预言"), "选择一名未查验过的角色，查验其的身份。");
+						// 【把自己以前的验人结果写回提示】原来结果只在查验那一刻闪 5 秒，之后人类玩家
+						// 无处可查；而 AI 预言家的 ai.swInsight 永久记着，甚至人类托管后 AI 接手还能用
+						// —— "AI 记得、人不记得"是纯粹的不对称，且是给 AI 加记忆时引入的。
+						// 提示只发给本人，是天然的私有通道，不用新造 UI、也不会泄漏给别人。
+						// 结果不必另存：get.insightResult 只依赖目标身份，客户端本地就能算；
+						// "验过谁"在 storage 里（markAuto → markSkill 会同步给客户端，
+						// 上面那条 filterTarget 也正是靠它去重的）。
+						{
+							const seen = current.getStorage("sw_yvyanjiaInsight");
+							if (seen.length) {
+								next.set("prompt2", '选择一名未查验过的角色。<br><span class="bluetext">已验：' + seen.map(one => get.translation(one) + "=" + (get.insightResult(current, one) === "huai" ? "狼人" : "好人")).join("、") + "</span>");
+							}
+						}
 						next.set("filterTarget", (card, player, target) => {
 							return target != player && !player.getStorage("sw_yvyanjiaInsight").includes(target);
 						});
@@ -170,8 +195,16 @@ export default {
 							next.set("_global_waiting", true);
 							break;
 						}
-					// 已选过偶像的觉孤落到 default：与平民一样只有空过一手
-					// eslint-disable-next-line no-fallthrough
+						// 已认下偶像的觉孤：和平民一样只有空过一手，但提示里要报出偶像是谁。
+						// 偶像死在自己手上直接判本局目标失败，而 AI 觉孤靠 swState.jx_anlian 永远记得，
+						// 人类玩家几轮之后很可能忘 —— 同样是"AI 记得、人不记得"。
+						// jx_anlian 是 broadcastAll 存的，客户端本地就有；提示只发给本人，不会泄漏。
+						next = current.chooseBool(get.prompt2("空白"), "你没有能够在此时发动的技能，点哪个都一样~~~");
+						if (current?.swState?.jx_anlian) {
+							next.set("prompt2", '你没有能够在此时发动的技能。<br><span class="bluetext">你的偶像：' + get.translation(current.swState.jx_anlian) + "（死在你手上会直接判负）</span>");
+						}
+						next.set("_global_waiting", true);
+						break;
 					default:
 						next = current.chooseBool(get.prompt2("空白"), "你没有能够在此时发动的技能，点哪个都一样~~~");
 						next.set("_global_waiting", true);
@@ -207,23 +240,26 @@ export default {
 					// 往队内频道报一句。chatTeamOnline 只发给狼（且只有 game.me / 在线真人狼收得到，
 					// AI 之间互相不用看），并且会进 lib.SWchatHistory，气泡消失后还能翻聊天记录
 					current.chatTeamOnline(`我刀 ${get.translation(knifed)}（${dmg}点）`);
-					_status.swNightPlanText += `${_status.swNightPlanText ? "、" : ""}${get.translation(current)}→${get.translation(knifed)}(${dmg}点)`;
+					// 追加到提示串。开头已经是"全队本轮共 N 点"，第一条选择用「｜队友已选：」接上
+					_status.swNightPlanText += `${/队友已选/.test(_status.swNightPlanText) ? "、" : "｜队友已选："}${get.translation(current)}→${get.translation(knifed)}(${dmg}点)`;
 				}
-				// 汇总只推给狼，不 broadcastAll —— 没必要让非狼的客户端也拿到狼队的计划
-				if (_status.swNightPlanText) {
-					const wolves = game.filterPlayer2();
-					for (let i = 0; i < wolves.length; i++) {
-						if (!wolves[i].isLang()) {
-							continue;
-						}
-						if (wolves[i] === game.me) {
-							continue; // 主机侧 _status 已经是同一份
-						}
-						if (wolves[i].isOnline2()) {
-							wolves[i].send(text => {
-								_status.swNightPlanText = text;
-							}, _status.swNightPlanText);
-						}
+			}
+			// 把队内信息（全队夜刀总量 + AI 队友已选）推给狼，不 broadcastAll —— 没必要让非狼的
+			// 客户端也拿到狼队计划。放在 ① 之外：就算一头 AI 狼都没有（狼队全是真人），
+			// 全队总量那一句也该发出去。
+			if (_status.swNightPlanText) {
+				const wolves = game.filterPlayer2();
+				for (let i = 0; i < wolves.length; i++) {
+					if (!wolves[i].isLang()) {
+						continue;
+					}
+					if (wolves[i] === game.me) {
+						continue; // 主机侧 _status 已经是同一份
+					}
+					if (wolves[i].isOnline2()) {
+						wolves[i].send(text => {
+							_status.swNightPlanText = text;
+						}, _status.swNightPlanText);
 					}
 				}
 			}
