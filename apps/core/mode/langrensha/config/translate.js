@@ -25,4 +25,5 @@ export default {
 	huai: "狼人",
 	huai2: "狼人",
 	_sw_dieSkill: "技能",
+	_sw_talkSkill: "发言",
 };

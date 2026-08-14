@@ -466,6 +466,87 @@ export default {
 		},
 	},
 	// 死亡结算：先把狼刀伤害转移给存活狼队友，再让猎人/白狼开枪
+	// 白天回合开始时的「跳身份」发言。只替 AI 托管的角色说 —— 真人自己会在公共聊天里说，
+	// 不该被系统代言。
+	//
+	// 【为什么不上 LLM 也值得做】狼人杀的发言承载两类东西：
+	//   ① 声明结构化事实（"我是预言家，昨晚验了X是狼"）—— 带槽位的模板就够，信息真实可验证
+	//   ② 辩论/圆谎/读空气 —— 这个才需要语言能力，纯规则做不了，套模板只会露馅
+	// ① 恰好是狼人杀里最关键的发言类型（跳预言家、报验人结果），做了就能让好人有可聚拢的
+	// 信息源；而"谁真谁假"的判断交给人类玩家，AI 不需要会辩论。
+	//
+	// 发言同时写进 game.log（气泡 5 秒就没了，日志能回看）和 _status.swClaims
+	// （公开声明的流水，将来要让 AI 之间互相采信/降权时从这里取，不必再造数据源）。
+	// swClaims 里刻意不记"这条是不是假的"—— 那是主机独有的知识，留着会诱使后续代码作弊。
+	_sw_talkSkill: {
+		trigger: { player: "phaseBegin" },
+		ruleSkill: true,
+		charlotte: true,
+		direct: true,
+		nopop: true,
+		popup: false,
+		log: false,
+		filter(event, player) {
+			// 真人（本机的 game.me 或在线的）自己说，不代言；死人不说话
+			if (player === game.me || player.isOnline() || !player.isAlive()) {
+				return false;
+			}
+			const ability = player.getAbility();
+			if (ability === "yvyanjia") {
+				// 有还没报过的验人结果就报。已报条数记在 swState 上（一个计数，没有隐私）
+				return player.getStorage("sw_yvyanjiaInsight").length > (player?.swState?._saidInsight || 0);
+			}
+			if (ability === "lang") {
+				// 冒充预言家：一局一次，且只在"已经有非队友跳过预言家"之后才跳去对冲。
+				// 用 isLang() 判队友是合法的 —— 狼阵营开局互亮身份，这是狼自己就有的知识。
+				return !_status.swFakeSeerDone && Array.isArray(_status.swClaims) && _status.swClaims.some(one => one.player !== player && !one.player.isLang());
+			}
+			return false;
+		},
+		async content(event, trigger, player) {
+			_status.swClaims ??= [];
+			const ability = player.getAbility();
+			let target;
+			let word;
+			let first;
+			if (ability === "yvyanjia") {
+				const seen = player.getStorage("sw_yvyanjiaInsight");
+				target = seen[seen.length - 1];
+				if (!target) {
+					return;
+				}
+				word = get.insightResult(player, target) === "huai" ? "狼人" : "好人";
+				first = !player?.swState?._saidInsight;
+				player.swState ??= {};
+				player.swState._saidInsight = seen.length;
+			} else {
+				// 狼冒充：指认一个最想让他死的非队友。把谎言和真实目标对齐 ——
+				// 骗好人去票/杀这个人，正好是狼本来就想要的结果
+				const candidates = game.filterPlayer(one => one !== player && !one.isLang());
+				if (!candidates.length) {
+					return;
+				}
+				candidates.sort((a, b) => get.attitude(player, a) - get.attitude(player, b));
+				target = candidates[0];
+				word = "狼人";
+				first = true;
+				_status.swFakeSeerDone = true;
+			}
+			const text = (first ? "我是预言家，" : "") + `昨晚我验了${get.translation(target)}，是${word}`;
+			// say 只在本地建气泡、不广播，故包一层 broadcastAll（单机下就是本地执行一次）
+			game.broadcastAll(
+				(one, str) => {
+					one.say(str);
+				},
+				player,
+				text
+			);
+			game.log(player, first ? "声称自己是预言家，并称" : "称", target, "是" + word);
+			_status.swClaims.push({ player: player, target: target, word: word });
+			await game.delay(1.5);
+		},
+	},
+
 	_sw_dieSkill: {
 		trigger: {
 			player: ["dieAfter"],
