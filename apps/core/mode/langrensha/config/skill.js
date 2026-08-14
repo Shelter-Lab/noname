@@ -497,9 +497,20 @@ export default {
 				return player.getStorage("sw_yvyanjiaInsight").length > (player?.swState?._saidInsight || 0);
 			}
 			if (ability === "lang") {
-				// 冒充预言家：一局一次，且只在"已经有非队友跳过预言家"之后才跳去对冲。
+				// 冒充预言家：一局只有一头狼跳
+				if (_status.swFakeSeerDone) {
+					return false;
+				}
+				// 开局被掷中「先手」的那头狼主动起跳，不等别人。
+				// 【为什么要有先手】否则狼永远只能后跳，"后跳的一定是假的"就成了铁律，玩家一眼
+				// 识破。骰子在 index.js 的 start 里掷（整局固定），不能放在 filter 里 ——
+				// filter 会被调多次，随机值会让同一次触发前后不一致。
+				if (player.ai?.swFakeSeerEarly) {
+					return true;
+				}
+				// 没被掷中的：只在"已经有非队友跳过预言家"之后对冲，不然真预言家的话全场都信。
 				// 用 isLang() 判队友是合法的 —— 狼阵营开局互亮身份，这是狼自己就有的知识。
-				return !_status.swFakeSeerDone && Array.isArray(_status.swClaims) && _status.swClaims.some(one => one.player !== player && !one.player.isLang());
+				return Array.isArray(_status.swClaims) && _status.swClaims.some(one => one.player !== player && !one.player.isLang());
 			}
 			return false;
 		},

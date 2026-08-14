@@ -511,6 +511,19 @@ export default () => ({
 				}
 			}
 
+			// 冒充预言家的「先手」：以一半概率指定一头狼主动起跳，否则狼队只在有人跳预言家之后对冲。
+			//
+			// 【为什么必须随机，而且必须在这里掷】如果狼永远只能后跳，"后跳的一定是假的"就成了
+			// 铁律，玩家一眼识破，_sw_talkSkill 的冒充机制整个作废。而骰子不能掷在技能的 filter
+			// 里 —— filter 可能被调用多次，随机值会让同一次触发前后不一致（一会儿满足一会儿不
+			// 满足）。所以开局定一次，整局固定。
+			// 挂在 player.ai 上而不是 swState：这是 AI 的私有意图，swState 会被 syncState
+			// 整块广播给所有客户端。
+			const langs = game.players.filter(current => current.isLang());
+			if (langs.length && Math.random() < 0.5) {
+				langs.randomGet().ai.swFakeSeerEarly = true;
+			}
+
 			game.syncState();
 
 			event.trigger("gameStart");
