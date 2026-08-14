@@ -4,6 +4,27 @@ import { markGuessedGood, markInsight } from "./ai.js";
 
 // 狼人杀的两条"规则技"。技能名以下划线开头 → game.finishSkill 会自动 addGlobalSkill，
 // 无需给每个角色手动加技能；ruleSkill 只是把优先级压低(_priority -= 75)，让它排在角色技后面。
+/**
+ * 跳身份的台词池。
+ *
+ * 【真预言家和冒充的狼必须共用同一个池】如果两边措辞不同，措辞本身就成了破译线索 ——
+ * 这跟"后跳的一定是假的"是同一类漏洞，只是从顺序换成了用词。所以这里按「说什么」分类，
+ * 而不是按「谁在说」分类。
+ * 首次/后续分开：第一次要自报身份（起跳），之后就不用每次都重复"我是预言家"了。
+ */
+const SW_TALK = {
+	查杀首次: ["我是预言家，昨晚验了{0}，狼人", "起跳预言家，{0} 查杀", "我预言家，验的 {0}，是狼，别放过他", "跳个预言家，{0} 是狼"],
+	查杀后续: ["昨晚验了 {0}，也是狼", "{0} 查杀", "我又验了 {0}，狼人", "昨晚的 {0}，狼"],
+	金水首次: ["我是预言家，昨晚验了{0}，好人", "起跳预言家，{0} 金水", "我预言家，{0} 是好人，可以信", "跳预言家，{0} 金水"],
+	金水后续: ["{0} 金水", "昨晚验的 {0}，好人", "我验了 {0}，是好人", "{0} 是好人，不用查了"],
+};
+
+/** 从池子里随机取一句并填名字。这里的随机是纯展示用，不影响任何判定 */
+function swTalkLine(kind, first, name) {
+	const pool = SW_TALK[kind + (first ? "首次" : "后续")];
+	return pool.randomGet().replace("{0}", name);
+}
+
 export default {
 	// 每轮开始的"夜晚"：所有人同时行动，30 秒限时，之后按 觉孤 → 狼刀 → 女巫 → 预言家 的顺序结算。
 	_sw_roundSkill: {
@@ -497,9 +518,15 @@ export default {
 				return player.getStorage("sw_yvyanjiaInsight").length > (player?.swState?._saidInsight || 0);
 			}
 			if (ability === "lang") {
-				// 冒充预言家：一局只有一头狼跳
-				if (_status.swFakeSeerDone) {
+				// 一局只有一头狼冒充：两头狼都跳预言家等于自曝
+				if (_status.swFakeSeer && _status.swFakeSeer !== player) {
 					return false;
+				}
+				// 【已经在冒充的那头要每天继续报】不然"跳了一次就再也不说话"本身就是破绽 ——
+				// 真预言家每晚都有新结果、天天报，到第二天"还在持续报的那个"就必定是真的。
+				// 这和"后跳必假"是同一类漏洞，只是从顺序换成了频率。
+				if (_status.swFakeSeer === player) {
+					return true;
 				}
 				// 开局被掷中「先手」的那头狼主动起跳，不等别人。
 				// 【为什么要有先手】否则狼永远只能后跳，"后跳的一定是假的"就成了铁律，玩家一眼
@@ -518,7 +545,7 @@ export default {
 			_status.swClaims ??= [];
 			const ability = player.getAbility();
 			let target;
-			let word;
+			let kind;
 			let first;
 			if (ability === "yvyanjia") {
 				const seen = player.getStorage("sw_yvyanjiaInsight");
@@ -526,24 +553,38 @@ export default {
 				if (!target) {
 					return;
 				}
-				word = get.insightResult(player, target) === "huai" ? "狼人" : "好人";
+				kind = get.insightResult(player, target) === "huai" ? "查杀" : "金水";
 				first = !player?.swState?._saidInsight;
 				player.swState ??= {};
 				player.swState._saidInsight = seen.length;
 			} else {
-				// 狼冒充：指认一个最想让他死的非队友。把谎言和真实目标对齐 ——
-				// 骗好人去票/杀这个人，正好是狼本来就想要的结果
-				const candidates = game.filterPlayer(one => one !== player && !one.isLang());
-				if (!candidates.length) {
+				// 狼冒充。两种打法轮着来，都是真牌局里的常规操作：
+				//   · 查杀一个好人 —— 骗好人去针对他，正好是狼本来就想要的结果
+				//   · 给队友发金水 —— 用假身份给队友洗白，比查杀更实用
+				// 记在 player.ai 上（主机私有，不进 swState，后者会被 syncState 广播）
+				player.ai.swFakeAccused ??= [];
+				const mates = game.filterPlayer(one => one !== player && one.isLang() && !player.ai.swFakeAccused.includes(one));
+				const others = game.filterPlayer(one => one !== player && !one.isLang() && !player.ai.swFakeAccused.includes(one));
+				// 有队友可洗且掷中，就发金水；否则查杀。都没人可点就闭嘴
+				if (mates.length && others.length && Math.random() < 0.35) {
+					target = mates.randomGet();
+					kind = "金水";
+				} else if (others.length) {
+					// 查杀挑"最想让他死的"那个
+					others.sort((x, y) => get.attitude(player, x) - get.attitude(player, y));
+					target = others[0];
+					kind = "查杀";
+				} else if (mates.length) {
+					target = mates.randomGet();
+					kind = "金水";
+				} else {
 					return;
 				}
-				candidates.sort((a, b) => get.attitude(player, a) - get.attitude(player, b));
-				target = candidates[0];
-				word = "狼人";
-				first = true;
-				_status.swFakeSeerDone = true;
+				player.ai.swFakeAccused.push(target);
+				first = !_status.swFakeSeer;
+				_status.swFakeSeer = player;
 			}
-			const text = (first ? "我是预言家，" : "") + `昨晚我验了${get.translation(target)}，是${word}`;
+			const text = swTalkLine(kind, first, get.translation(target));
 			// say 只在本地建气泡、不广播，故包一层 broadcastAll（单机下就是本地执行一次）
 			game.broadcastAll(
 				(one, str) => {
@@ -552,8 +593,9 @@ export default {
 				player,
 				text
 			);
-			game.log(player, first ? "声称自己是预言家，并称" : "称", target, "是" + word);
-			_status.swClaims.push({ player: player, target: target, word: word });
+			// 气泡 5 秒就没了，日志能回看
+			game.log(player, first ? "起跳预言家，称" : "称", target, "是" + (kind === "查杀" ? "狼人" : "好人"));
+			_status.swClaims.push({ player: player, target: target, kind: kind });
 			await game.delay(1.5);
 		},
 	},
