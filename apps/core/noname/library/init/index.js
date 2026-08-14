@@ -183,15 +183,18 @@ export class LibInit {
 							fetched.push({ path: pathOf(url), buf, mime, sha: await sha16(buf) });
 							return;
 						}
-						// 代码(或素材库不可用时的一切)→ Cache Storage,行为与以前完全一致。
+						// 代码 → Cache Storage,行为与以前完全一致。
 						// iOS 不接受 redirected 响应:重定向的先用响应体重建干净副本再缓存。
 						let toCache = r.clone();
 						if (r.redirected) {
 							const body = await r.clone().blob();
 							toCache = new Response(body, { status: r.status, statusText: r.statusText, headers: r.headers });
 						}
-						const target = db ? codeCache : isCodeAsset(pathOf(url)) ? codeCache : legacyAssetCache;
-						await target.put(url, toCache);
+						// 【只剩代码桶一个去处】上面 db 为空时已经 return 了,所以这里 db 必真;
+						// 原来这行写的是 `db ? codeCache : … : legacyAssetCache`,而 legacyAssetCache
+						// 的声明已随回退路径一起删掉 —— 那是个悬空标识符,只是因为三元的
+						// else 分支永不求值才没炸。node --check 和构建都查不出这种洞,必须手动清掉。
+						await codeCache.put(url, toCache);
 					})
 				);
 				// 【一个事务写一批,不是一条一个事务】IDB 每个事务都有固定开销,逐条开事务在两万条
