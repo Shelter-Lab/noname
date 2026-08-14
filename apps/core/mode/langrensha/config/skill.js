@@ -19,6 +19,10 @@ export default {
 		},
 		async content(event, trigger, player) {
 			_status.langrenshaRound = game.roundNumber;
+			// 本轮的狼刀记账（playerid → 已安排的伤害），供狼刀 AI 避免把刀叠在同一人身上浪费。
+			// 每轮清空。只记 AI 狼的选择：真人是并行秘密选的，主机在他响应前拿不到，
+			// 而且把真人的秘密选择透给 AI 队友也不合适。
+			_status.swNightPlan = {};
 			const targets = game.players.slice(0).sortBySeat();
 			let answer_result = [[], []];
 			let humans = targets.filter(current => current === game.me || current.isOnline()); // 真人
@@ -33,8 +37,20 @@ export default {
 						next = current.chooseTarget(get.prompt2("狼刀"));
 						next.set("ai", target => {
 							const player = get.player();
-							// 越恨越优先。狼刀伤害同目标会累加，所以同等仇恨下先补残血的，集火比分散快
-							return -get.attitude(player, target) + (target.hp <= 2 ? 1 : 0) - target.hp * 0.1;
+							const dmg = player?.swState?.langdao || 1;
+							// _status.swNightPlan 记的是本轮已经由 AI 狼安排出去的刀（见下面 locals 循环）。
+							// 狼刀同目标会累加，所以要区分三种情形，否则会出现"三头狼把 4 点全砸在
+							// 1 血的人身上"这种纯浪费，或者"永远只挑没刀过的满血人、第二轮不去收残血"。
+							const planned = (_status.swNightPlan && _status.swNightPlan[target.playerid]) || 0;
+							let score = -get.attitude(player, target);
+							if (planned >= target.hp) {
+								score -= 4; // 队友的刀已经够收掉他了，再叠上去是纯浪费
+							} else if (planned + dmg >= target.hp) {
+								score += 3; // 这一刀正好能收人头 —— 最高优先
+							} else {
+								score += (5 - Math.min(5, target.hp)) * 0.3; // 收不掉就越残血越优先
+							}
+							return score;
 						});
 						next.set("prompt2", "选择一名角色，使其流失" + (current.swState.langdao || 1) + "点体力。（不触发技能）");
 						next.set("_global_waiting", true);
@@ -199,6 +215,13 @@ export default {
 					const result = await send(current).forResult();
 					answer_result[0].push(current);
 					answer_result[1].push(result);
+					// 记下这一刀，让后面才决策的 AI 狼看得到（locals 是顺序跑的，所以能串起来）
+					if (current.getAbility() === "lang" && result?.bool && result.targets?.length) {
+						const knifed = result.targets[0];
+						if (knifed?.playerid) {
+							_status.swNightPlan[knifed.playerid] = (_status.swNightPlan[knifed.playerid] || 0) + (current?.swState?.langdao || 1);
+						}
+					}
 				}
 			}
 			delete event._global_waiting;

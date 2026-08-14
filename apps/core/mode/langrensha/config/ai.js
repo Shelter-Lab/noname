@@ -102,7 +102,12 @@ function guessCamp(from, to) {
 		return { camp: "ren", confidence: 0.9 };
 	}
 	if (to.ai?.swCampGuess) {
-		return { camp: to.ai.swCampGuess, confidence: 0.75 };
+		// 【狼看这条信息比别人准】swCampGuess 只有"被狼刀过 / 被女巫救活"两种来源，
+		// 而狼刀是狼自己下的 —— 狼队清楚谁挨过刀，也就清楚那人不是自己队友，所以对狼是铁证。
+		// 别人只能推定（0.75），因为理论上狼可能刀到隐狼队友。
+		// 这条不给足置信会有个很反直觉的后果：刀过一个人反而让狼对他没那么恨
+		// （-6.34 变 -4.50），把补刀的优先级压到"没刀过的满血人"之下，第二轮不会去收残血。
+		return { camp: to.ai.swCampGuess, confidence: from.isLang() ? 1 : 0.75 };
 	}
 	return { camp: null, confidence: 0 };
 }

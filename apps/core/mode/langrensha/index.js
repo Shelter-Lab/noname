@@ -676,21 +676,37 @@ export default () => ({
 			const next = game.createEvent("chooseCharacter");
 			next.setContent(async event => {
 				const playersAll = game.players.slice(0);
-				let identityList = [];
-				switch (swConfig("langrensha_banzi")) {
-					case "juegu":
-						identityList = ["lang", "pingmin", "jx_gudushaonv", "yvyanjia", "langwang", "nvwu", "lang", "lieren", "pingmin", "bailang"];
-						break;
-					default:
-						identityList = ["lang", "pingmin", "pingmin", "yvyanjia", "langwang", "nvwu", "lang", "lieren"];
-						break;
+				// 按人数显式列板子。以前是一张定长表 + 从尾部截断，而尾部正好是猎人和白狼，
+				// 于是 6/7 人局没有猎人、狼占比还偏高（7 人是 狼3 对 好人4）。
+				// 【两条硬约束】① 每个板子至少 1 个平民 —— 屠边判定里
+				// get.campPopulation("ren", true) == 0 即狼胜，而 getCamp(true) 只有 pingmin 算 "ren"
+				// （觉孤要认下偶像后才算），民数为 0 会在开局第一次 checkResult 就直接判狼胜；
+				// ② 8 人普通板和 10 人觉孤板是原设计，不要动。
+				const BANZI = {
+					normal: {
+						6: ["lang", "langwang", "pingmin", "yvyanjia", "nvwu", "lieren"],
+						7: ["lang", "langwang", "pingmin", "pingmin", "yvyanjia", "nvwu", "lieren"],
+						8: ["lang", "lang", "langwang", "pingmin", "pingmin", "yvyanjia", "nvwu", "lieren"],
+						9: ["lang", "lang", "langwang", "pingmin", "pingmin", "pingmin", "yvyanjia", "nvwu", "lieren"],
+						10: ["lang", "lang", "langwang", "pingmin", "pingmin", "pingmin", "pingmin", "yvyanjia", "nvwu", "lieren"],
+					},
+					juegu: {
+						6: ["lang", "langwang", "pingmin", "jx_gudushaonv", "yvyanjia", "nvwu"],
+						7: ["lang", "langwang", "pingmin", "jx_gudushaonv", "yvyanjia", "nvwu", "lieren"],
+						8: ["lang", "lang", "langwang", "pingmin", "jx_gudushaonv", "yvyanjia", "nvwu", "lieren"],
+						9: ["lang", "lang", "langwang", "pingmin", "pingmin", "jx_gudushaonv", "yvyanjia", "nvwu", "lieren"],
+						10: ["lang", "lang", "langwang", "bailang", "pingmin", "pingmin", "jx_gudushaonv", "yvyanjia", "nvwu", "lieren"],
+					},
+				};
+				const banzi = swConfig("langrensha_banzi") === "juegu" ? BANZI.juegu : BANZI.normal;
+				let identityList = (banzi[playersAll.length] || []).slice(0);
+				// 人数落在表外（菜单只给 6~10，但联机房的人数选项是 2~10）时退回老办法：
+				// 拿最大的那张表截断，再补平民。补平民这一步不能省 —— 少了它多出来的人
+				// identity 会是 undefined，getCamp() 当好人、getCamp(true) 还算成"神职"，
+				// 直接歪掉屠边判定，结算时身份牌也会显示成 "undefined2"。
+				if (!identityList.length) {
+					identityList = banzi[10].slice(0, playersAll.length);
 				}
-				// 身份表是固定顺序的，人数不足就从尾巴截断（所以 8 人以下板子不完整）
-				identityList = identityList.splice(0, playersAll.length);
-				// 反过来人数超过身份表长度（普通板只有 8 个身份，却开了 9/10 人）时，splice 不会
-				// 补长，多出来的人 identity 会是 undefined —— getCamp() 把它当好人、且 elobrate
-				// 时算成"神职"（因为不是 pingmin），直接歪掉屠边判定；结算时 get.translation
-				// 还会显示成 "undefined2"。补平民兜住：多的人一律当平民，好人这边多几个帮手
 				while (identityList.length < playersAll.length) {
 					identityList.push("pingmin");
 				}
