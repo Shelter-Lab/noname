@@ -190,6 +190,28 @@ export function rawAttitude(from, to) {
  * 目标还没被看穿的话，帮他/砍他都推不出行动者的立场，系数按目标的可读程度打折。
  */
 export function logAi(targets, card) {
+	// 【整体包一层 try/catch，不是防御性洁癖，是必须的】
+	// core 在 player.useCard / useSkill 里是**不加保护**地调 logAi 的（player.js:7761 / 7813），
+	// 就在事件真正建立之前。所以这里一抛，整次出牌就断在半路：牌没被消耗、事件没跑完，
+	// 而 AI 的评估条件没变，下一轮又选同一张 —— 表现就是"历史记录里同一个动作无限重复、
+	// 手牌数一直不变"，整局卡死。
+	// 而 logAi 干的事只是记一笔"暴露度"，纯 AI 记账，失败了最多让 AI 判断得糙一点，
+	// 绝不该有能力打断一次出牌。所以宁可吞掉异常并打日志。
+	// 主要风险点是下面的 get.effect：它遇到玩家身上有未注册技能时会直接 throw
+	// （get/index.js 的 `throw new Error(skill + "不存在的技能")`），而 card 参数还可能是
+	// 技能名字符串（useSkill 那条路传的就是 next.skill），各卡牌/技能自己写的
+	// ai.effect.target 未必都能接住字符串。
+	try {
+		logAiUnsafe.call(this, targets, card);
+	} catch (e) {
+		console.warn("[狼人杀] logAi 出错，已忽略（不影响出牌，但 AI 暴露度这次没记上）", e, {
+			player: this?.name,
+			card: typeof card === "string" ? card : card?.name,
+		});
+	}
+}
+
+function logAiUnsafe(targets, card) {
 	if (this.identityShown || this.ai.shown >= 0.95 || this.isMad()) {
 		return;
 	}
