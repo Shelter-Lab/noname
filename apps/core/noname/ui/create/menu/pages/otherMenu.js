@@ -1,5 +1,5 @@
 import { menuContainer, menuxpages, menuUpdates, openMenu, clickToggle, clickSwitcher, clickContainer, clickMenuItem, createMenu, createConfig } from "../index.js";
-import { ui, game, get, ai, lib, _status } from "noname";
+import { ui, game, get, ai, lib, _status, rootURL } from "noname";
 import { createApp } from "vue";
 import { security } from "@/util/sandbox.js"
 import dedent from "dedent";
@@ -205,7 +205,17 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					var assets = null;
 					var versionCount = null;
 					try {
-						var db = await import(/* @vite-ignore */ `${lib.assetURL}pwa-asset-db-esm.js`);
+						// 【必须用 rootURL,绝不能用 lib.assetURL】lib.assetURL 是**空字符串**
+						// (util/index.js:4),拼出来就是 import("pwa-asset-db-esm.js") —— 那是个
+						// **裸模块说明符**。不以 / 、./ 、../ 开头的说明符按 import map 解析,
+						// 而 import map 里没这个名字 → 直接抛 TypeError:
+						// Failed to resolve module specifier。
+						// 于是素材体检/比对这几处**从来没成功过一次**:异常被 catch 吃掉,
+						// 于是报「素材 0 个」/「素材库打不开」、比对恒说「与线上一致」。
+						// 而下载器(library/init/index.js:98)用的是 rootURL,所以它一直好 ——
+						// 库里那 1.4 万个素材确实是满的(离线立绘正常就是铁证),只是这边读不到。
+						// rootURL = new URL("./", import.meta.url),是带尾斜杠的真实绝对 URL。
+						var db = await import(/* @vite-ignore */ `${rootURL}pwa-asset-db-esm.js`);
 						assets = await db.countAssets();
 						var v = await db.getVersions();
 						versionCount = v ? Object.keys(v).length : null;
@@ -248,7 +258,7 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 			async function inspectAssets() {
 				let db;
 				try {
-					db = await import(/* @vite-ignore */ `${lib.assetURL}pwa-asset-db-esm.js`);
+					db = await import(/* @vite-ignore */ `${rootURL}pwa-asset-db-esm.js`);
 				} catch (e) {
 					return null; // 素材库不可用 → 这一项直接跳过,不影响版本检查
 				}
@@ -487,7 +497,7 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 				try {
 					var db = null;
 					try {
-						db = await import(/* @vite-ignore */ `${lib.assetURL}pwa-asset-db-esm.js`);
+						db = await import(/* @vite-ignore */ `${rootURL}pwa-asset-db-esm.js`);
 					} catch (e) {
 						alert("素材库模块都加载不了:" + (e && e.message ? e.message : e));
 						return;
