@@ -551,11 +551,15 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					b.disabled = false;
 				}
 			});
-			diagBtn.style.marginLeft = "6px";
+			// 【单独一行】上一版把它和「检查更新」+版本戟挤在同一个 nowrap 的 <p> 里,
+			// 手机窄屏上第二个按钮会被推出可视区 —— 按钮在那儿、但人看不到。
+			var diagPx = ui.create.node("p");
+			diagPx.style.marginTop = "8px";
 			updateCheckPx.appendChild(checkUpdateBtn);
-			updateCheckPx.appendChild(diagBtn);
 			updateCheckPx.appendChild(versionSpan);
 			ul.appendChild(updateCheckPx);
+			diagPx.appendChild(diagBtn);
+			ul.appendChild(diagPx);
 		}
 
 		page.appendChild(ul);
