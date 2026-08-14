@@ -630,16 +630,21 @@ self.addEventListener("fetch", event => {
 				// repair())都是用户点了按钮正在等、界面上还有进度条,该给足耐心;其余情况按 miss 的
 				// 默认档 8 秒(与 missTimeoutMs 的兜底档一致)。
 				const ms = req.cache === "no-cache" ? 20000 : 8000;
-				try {
-					const resp = await fetchSafe(req, undefined, ms);
-					if (resp && resp.status === 200) {
-						const clean = await sanitizeResponse(resp.clone());
-						cache.put(req, clean);
+				const isVersionStamp = url.pathname.endsWith("/pwa-version.json");
+				// 【非 200 也必须走兜底】原来只有 fetchSafe **抛异常**才兜底,一旦拿到 5xx
+				// (CF 部署切换的那几秒、边缘节点抖动)就原样返回 → 页面 r.ok 为 false →
+				// 「联网检查失败」,而缓存里明明有一份可用的清单。故把兜底提成函数,两条路都走它。
+				const fallback = async () => {
+					// 【版本戳绝不能拿缓存顶】缓存里那份就是本地这一版,返回它 = 页面比对下来
+					// 「已是最新版本」—— 把"没问到线上是哪版"伪装成"线上没有新版",比报错更坏。
+					// 原来的 catch 里 `if (cached) return cached` 对它是错的。
+					if (isVersionStamp) {
+						return new Response("版本戳取不到", { status: 504, statusText: "Offline" });
 					}
-					return await sanitizeResponse(resp);
-				} catch {
 					const cached = await cache.match(req);
-					if (cached) return cached;
+					if (cached) {
+						return cached;
+					}
 					// 【带 no-cache 的请求绝不能收到下面那个假空清单】它明说了"我要网络上的真相",
 					// 而 repair() 给 URL 挂了一次性 bust 串 —— 缓存里必然未命中,于是只要网络抖一下
 					// 超了时,它拿到的就是「status 200 + []」这么个合法响应,filter 完长度为 0 →
@@ -655,6 +660,17 @@ self.addEventListener("fetch", event => {
 					// 名字以 hashes.json 结尾故落在 "{}" 这侧,恰好对 —— 别改成按 ".json" 一刀切)。
 					const empty = url.pathname.endsWith("assets.json") ? "[]" : "{}";
 					return new Response(empty, { status: 200, headers: { "Content-Type": "application/json" } });
+				};
+				try {
+					const resp = await fetchSafe(req, undefined, ms);
+					if (resp && resp.status === 200) {
+						const clean = await sanitizeResponse(resp.clone());
+						cache.put(req, clean);
+						return await sanitizeResponse(resp);
+					}
+					return await fallback();
+				} catch {
+					return await fallback();
 				}
 			})()
 		);

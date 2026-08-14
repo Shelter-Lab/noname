@@ -24,10 +24,25 @@
 //     188438(2018 标 FIXED 但 iOS 18.7 / 26.5.2 仍有新报告)。
 // 代价:MIME 要自己存(ArrayBuffer 不携带类型),见 putAsset/readAsset。
 
+// 【为什么要第二张表存版本号】素材要能回答"我手上这份是哪一版",否则改了图但路径不变时
+// 无从判断新旧(记录里没 ETag,发不出 If-None-Match)。历史上这份账放在**单独一条记录**
+// (`__asset_baseline__`,14403 行挤在一个 value 里),于是"账"和"实物"成了两份能各自出错的
+// 数据 —— 实测三种烂法全中:
+//   ① 搬货不记账:素材写入有三个入口(下载器 / SW 访问即缓存 / SW 换版后台校验),
+//      **一个都没记账**,于是"建立基线"之后新装或被覆盖的素材永久隐形;
+//   ② 账活着实物没了:prune 把基线列为保留键删不掉,清空素材后账还声称有 14403 条;
+//   ③ 读账失败被当成"账是空的",于是恒报"与线上一致"。
+// 根治办法不是逐个补记账(靠自觉,已经忘了两处),而是**让写字节和写版本号变成同一个动作** ——
+// 塞进 putAsset/putAssets 内部、同一个 IDB 事务。而这要求"批量读全部版本号"必须便宜,
+// 单条大记录做不到(改一行要整条 800KB 读改写),所以拆成一张 path→sha 的小表。
+// 收益:不再需要 getBaseline/saveBaseline/computeBaseline/updateBaseline 那一整套,净减代码。
 const DB_NAME = "noname-assets";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 // 素材表:key = pathname(如 "/image/character/re_caocao.jpg"),value = { buf, mime, len }
 const STORE = "assets";
+// 版本表:key = 同一个 pathname,value = 该素材字节的 SHA-256 前 16 位十六进制。
+// 每条 16 字节,getAll() 全取回来只有几百 KB —— 这是"能塞进 putAsset"的前提。
+const VSTORE = "versions";
 
 let dbPromise = null;
 
@@ -40,9 +55,45 @@ function openAssetDB() {
 	if (!dbPromise) {
 		dbPromise = new Promise((resolve, reject) => {
 			const rq = indexedDB.open(DB_NAME, DB_VERSION);
-			rq.onupgradeneeded = () => {
+			rq.onupgradeneeded = event => {
 				const db = rq.result;
 				if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+				if (db.objectStoreNames.contains(VSTORE)) {
+					return;
+				}
+				db.createObjectStore(VSTORE);
+				// 【v1 → v2 迁移:把老的单条基线摊平进版本表】用户建过基线的话就不必重算 1GB。
+				// 在 versionchange 事务里读写都是同步 API,嵌套请求会把事务保持到做完为止。
+				// 没建过基线的用户这里什么都不做 —— 素材的版本记作"未知",由
+				// backfillVersions() 在用户点检查更新时本地算一遍补上(不联网)。
+				// 【oldVersion 为 0 = 全新库】没有旧基线可摊,直接跳过。
+				if (event.oldVersion < 1) {
+					return;
+				}
+				// 【统一用 rq.transaction.objectStore 取句柄】createObjectStore 的返回值也能用,
+				// 但它的生命周期绑在这个 versionchange 事务上、又要跨到下面的异步回调里去用,
+				// 容易看不清;从事务上现取则语义无歧义。
+				const tx = rq.transaction;
+				const getOld = tx.objectStore(STORE).get(LEGACY_BASELINE_KEY);
+				getOld.onsuccess = () => {
+					const map = getOld.result && getOld.result.map;
+					if (!map) {
+						return;
+					}
+					const vstore = tx.objectStore(VSTORE);
+					for (const path in map) {
+						vstore.put(map[path], path);
+					}
+					// 摊平完就把这条 800KB 的大记录删掉 —— 它同时也是 prune 的保留键,
+					// 留着只会继续制造"账实不符"的可能。
+					tx.objectStore(STORE).delete(LEGACY_BASELINE_KEY);
+				};
+				// 迁移失败不能让整个 open 失败:版本表留空 = 全部"版本未知",
+				// backfillVersions 本地算一遍就补上了,不影响素材可读。
+				getOld.onerror = event2 => {
+					event2.preventDefault();
+					event2.stopPropagation();
+				};
 			};
 			rq.onsuccess = () => {
 				const db = rq.result;
@@ -137,11 +188,29 @@ async function readAsset(pathname, request) {
 	}
 }
 
-/** 写一条素材。value 存 { buf: ArrayBuffer, mime, len } */
+/** 算内容版本号:SHA-256 取前 16 位十六进制(= 64 bit,1.4 万文件下碰撞概率约 5e-12) */
+async function sha16(buf) {
+	const digest = await crypto.subtle.digest("SHA-256", buf);
+	return [...new Uint8Array(digest)]
+		.map(b => b.toString(16).padStart(2, "0"))
+		.join("")
+		.slice(0, 16);
+}
+
+/**
+ * 写一条素材。value 存 { buf: ArrayBuffer, mime, len },同时把版本号写进版本表。
+ * 【两者必须同事务】这是整套机制的地基:不存在"只写字节不写版本号"这个选项,
+ * 所以三个写入口(下载器 / SW 访问即缓存 / SW 换版后台校验)谁都不可能忘记记账。
+ */
 async function putAsset(pathname, buf, mime) {
+	// 【哈希必须在开事务之前算完】crypto.subtle.digest 是异步的,而 IDB 事务在事件循环
+	// 空转一轮就自动提交 —— 在事务里 await 会让事务提前关掉,之后的 put 全抛
+	// TransactionInactiveError。
+	const sha = await sha16(buf);
 	const db = await openAssetDB();
-	const tx = db.transaction(STORE, "readwrite");
+	const tx = db.transaction([STORE, VSTORE], "readwrite");
 	tx.objectStore(STORE).put({ buf, mime: mime || "application/octet-stream", len: buf.byteLength }, pathname);
+	tx.objectStore(VSTORE).put(sha, pathname);
 	return new Promise((resolve, reject) => {
 		tx.oncomplete = () => resolve(true);
 		tx.onerror = () => reject(tx.error);
@@ -155,12 +224,16 @@ async function putAsset(pathname, buf, mime) {
  */
 async function putAssets(items) {
 	if (!items.length) return { ok: 0, failed: [] };
+	// 哈希全部在开事务之前算完,理由同 putAsset(事务里 await 会让它提前提交)
+	const shas = await Promise.all(items.map(it => sha16(it.buf)));
 	const db = await openAssetDB();
-	const tx = db.transaction(STORE, "readwrite");
+	const tx = db.transaction([STORE, VSTORE], "readwrite");
 	const store = tx.objectStore(STORE);
+	const vstore = tx.objectStore(VSTORE);
 	const failed = [];
 	let ok = 0;
-	for (const it of items) {
+	for (let i = 0; i < items.length; i++) {
+		const it = items[i];
 		try {
 			const r = store.put({ buf: it.buf, mime: it.mime || "application/octet-stream", len: it.buf.byteLength }, it.path);
 			r.onerror = e => {
@@ -172,91 +245,118 @@ async function putAssets(items) {
 				e.stopPropagation();
 			};
 			r.onsuccess = () => ok++;
+			const rv = vstore.put(shas[i], it.path);
+			rv.onerror = e => {
+				e.preventDefault();
+				e.stopPropagation();
+			};
 		} catch {
 			failed.push(it.path);
 		}
 	}
-	return new Promise(resolve => {
+	const result = await new Promise(resolve => {
 		tx.oncomplete = () => resolve({ ok, failed });
 		// 整个事务还是挂了(配额超限等)→ 这一批全算失败,让上层决定停还是重试
 		tx.onerror = tx.onabort = () => resolve({ ok, failed: items.map(i => i.path) });
 	});
+	// 【字节写失败的,版本号也不能留下】IDB 单条失败不连坐,所以可能出现"版本号写进去了、
+	// 字节没写进去" —— 那正是我们要消灭的谎言(账说新的、实物是旧的)。补一个事务删掉它们。
+	if (result.failed.length) {
+		try {
+			const tx2 = db.transaction(VSTORE, "readwrite");
+			const vs2 = tx2.objectStore(VSTORE);
+			for (const path of result.failed) {
+				vs2.delete(path);
+			}
+			await new Promise(resolve => {
+				tx2.oncomplete = tx2.onerror = tx2.onabort = () => resolve();
+			});
+		} catch {
+			/* 删不掉最坏是多报一次"有更新",不会造成"漏报" */
+		}
+	}
+	return result;
 }
 
-// —— 基线:本地每个素材的内容哈希 ——
-// 【它解决什么】素材键是 pathname,改了内容但路径不变时下载器判定"已有"就跳过,于是永远读旧字节
-// (记录里没 ETag,发不出 If-None-Match,"校验"只能整个重下)。有了基线就能和构建产出的
-// pwa-asset-hashes.json 逐条比对,精确算出变更集,一次 600KB 的清单下载换掉 1.4 万次往返。
-// 【为什么存成一条记录而不是每条素材加个字段】IDB 取一条会把整条(含 buf)反序列化出来,
-// 没法只读某个字段 —— 那样"读全部哈希"就等于把 1.16GB 素材全读一遍。存成单条映射则是 O(1)。
-// 【为什么必须记"本地实际有什么"而不是直接存服务端清单】直接存服务端那份等于替 IDB 撒谎:
-// 本地明明是旧字节,基线却声称与线上一致,之后永远 diff 不出差异。
-const BASELINE_KEY = "__asset_baseline__";
-// 保留键不是素材,必须从 keys/count/prune 里排除,否则会被当成"清单外的旧素材"删掉
-const RESERVED_KEYS = new Set([BASELINE_KEY]);
+// —— 版本表:本地每个素材的内容版本号 ——
+// 【为什么需要它】素材的键是 pathname,改了内容但路径不变时,光看键无从判断新旧
+// (记录里没 ETag,发不出 If-None-Match)。有了版本号就能和构建产出的
+// pwa-asset-hashes.json 逐条比对,精确算出变更集 —— 一次 792KB 的清单下载
+// 换掉 1.4 万次条件请求往返。
+// 【为什么本地版本号必须来自"本地实际的字节"而不是直接抄服务端清单】抄清单等于替
+// 素材库撒谎:本地明明是旧字节,版本表却声称与线上一致,之后永远 diff 不出差异。
+// 写入路径(putAsset/putAssets)算的正是刚从网络拿到、即将入库的那份字节,天然满足。
 
-/** 读基线 —— 返回 { path: hash } 映射;没有则 null */
-async function getBaseline() {
+// v1 时代那条单record基线的键。只在 v1→v2 迁移时用一次(摊平进版本表后删除)。
+const LEGACY_BASELINE_KEY = "__asset_baseline__";
+// 保留键不是素材,必须从 keys/count/prune 里排除。迁移后素材表里不该再有它,
+// 但老库在迁移跑完前仍可能存在,故保留这层过滤。
+const RESERVED_KEYS = new Set([LEGACY_BASELINE_KEY]);
+
+/** 读全部版本号 —— 返回 { path: sha } 映射;读不到返回 null(≠空对象,见文件下方说明) */
+async function getVersions() {
 	try {
 		const db = await openAssetDB();
-		const rec = await req(db.transaction(STORE, "readonly").objectStore(STORE).get(BASELINE_KEY));
-		return rec && rec.map ? rec.map : null;
+		const tx = db.transaction(VSTORE, "readonly");
+		const store = tx.objectStore(VSTORE);
+		// 每条只是 16 字符的字符串,getAll 整取回来几百 KB —— 不像素材表那样有 1.16GB 的顾虑
+		const [keys, values] = await Promise.all([req(store.getAllKeys()), req(store.getAll())]);
+		const map = {};
+		for (let i = 0; i < keys.length; i++) {
+			map[keys[i]] = values[i];
+		}
+		return map;
 	} catch {
 		return null;
 	}
 }
 
-/** 写基线(整体覆盖) */
-async function saveBaseline(map) {
-	const db = await openAssetDB();
-	const tx = db.transaction(STORE, "readwrite");
-	tx.objectStore(STORE).put({ map }, BASELINE_KEY);
-	return new Promise((resolve, reject) => {
-		tx.oncomplete = () => resolve(true);
-		tx.onerror = tx.onabort = () => reject(tx.error || new Error("基线写入失败"));
-	});
-}
-
 /**
- * 不联网地算出本地基线:遍历所有素材,对字节做 SHA-256 取前 16 位。
- * 【为什么能对上构建时的哈希】存进来的就是 CF 上的原始字节 —— 下载器用的是
- * `await r.arrayBuffer()`,SW 那条路只在 resp.redirected 时重建 Response 且 body 原样搬,
- * 两处都不改字节。所以本地算的和构建时算的是同一个输入。
- * 【为什么用游标而不是 getAll】getAll 会把全部素材(可达 1.16GB)一次性装进内存;
- * 游标一条一条来,处理完即可回收,峰值只有一条。
- * @param {(done:number)=>void} [onProgress] 每处理 200 条回报一次
- * @returns {Promise<Record<string,string>>}
+ * 给"素材在库里但版本号未知"的那些补算版本号(纯本地,不联网)。
+ * 只有两种来源:① v1 时代从没建过基线的老库;② 迁移时基线本身就缺的那些条目。
+ * 正常写入路径不会产生未知版本 —— putAsset/putAssets 同事务就写好了。
+ *
+ * 【为什么分批而不是游标一把撸】cursor.continue() 必须在 onsuccess 里同步调用,不能先 await
+ * 哈希算完再推进(事务会在空转时自动提交)。若同步推到底、把哈希排成 Promise 链慢慢算,
+ * 那 1.4 万个 buffer(可达 1.16GB)会被闭包同时按住 —— 直接 OOM。
+ * 分批则峰值只有 BATCH 条,且每批一个短事务,不会长期占着事务。
+ * @param {(done:number, total:number)=>void} [onProgress]
+ * @returns {Promise<number>} 补了几条
  */
-async function computeBaseline(onProgress) {
+async function backfillVersions(onProgress) {
 	const db = await openAssetDB();
-	// 先只取键(getAllKeys 不读值,很轻),再分批取值 —— 这是内存安全的关键。
-	// 【为什么不能用游标一把撸】cursor.continue() 必须在 onsuccess 里同步调用,不能先 await
-	// 哈希算完再推进(事务会在空转时自动提交)。若同步推到底、把哈希排成 Promise 链慢慢算,
-	// 那 1.4 万个 buffer(可达 1.16GB)会被闭包同时按住 —— 直接 OOM。
-	// 分批则峰值只有 BATCH 条,且每批一个短事务,不会长期占着事务。
+	const known = (await getVersions()) || {};
 	const allKeys = await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
-	const keys = allKeys.filter(k => !RESERVED_KEYS.has(k));
-	const map = {};
+	const keys = allKeys.filter(k => !RESERVED_KEYS.has(k) && !known[k]);
 	const BATCH = 40;
+	let done = 0;
 	for (let i = 0; i < keys.length; i += BATCH) {
 		const slice = keys.slice(i, i + BATCH);
-		const tx = db.transaction(STORE, "readonly");
-		const store = tx.objectStore(STORE);
-		const recs = await Promise.all(slice.map(k => req(store.get(k)).catch(() => null)));
+		const recs = await Promise.all(slice.map(k => req(db.transaction(STORE, "readonly").objectStore(STORE).get(k)).catch(() => null)));
+		const pairs = [];
 		for (let j = 0; j < slice.length; j++) {
 			const buf = recs[j] && recs[j].buf;
-			if (!buf) {
-				continue;
+			if (buf) {
+				pairs.push([slice[j], await sha16(buf)]);
 			}
-			const digest = await crypto.subtle.digest("SHA-256", buf);
-			map[slice[j]] = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+		}
+		if (pairs.length) {
+			const tx = db.transaction(VSTORE, "readwrite");
+			const vs = tx.objectStore(VSTORE);
+			for (const [path, sha] of pairs) {
+				vs.put(sha, path);
+			}
+			await new Promise(resolve => {
+				tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+			});
+			done += pairs.length;
 		}
 		// recs 这一批出了作用域即可回收
 		if (onProgress) {
 			onProgress(Math.min(i + BATCH, keys.length), keys.length);
 		}
 	}
-	return map;
+	return done;
 }
 
 // 【打不开时返回 null,绝不返回空 Set / 0】空和"读不到"是完全不同的故障:
@@ -309,9 +409,15 @@ async function pruneAssets(validPathSet) {
 			console.error(`[素材库] prune 拒绝执行:要删 ${dead.length}/${keys.length} 条(超过一半)。` + `几乎必然是资源清单不完整或路径键不一致,已跳过以免清空整库。`);
 			return 0;
 		}
-		const tx = db.transaction(STORE, "readwrite");
+		// 【字节和版本号同事务一起删】漏删版本号会留下"版本表说有、素材表没有"
+		// 的孤儿记录 —— 那正是 v1 撕裂状态的同一种形态，必须同事务消掉。
+		const tx = db.transaction([STORE, VSTORE], "readwrite");
 		const store = tx.objectStore(STORE);
-		for (const k of dead) store.delete(k);
+		const vstore = tx.objectStore(VSTORE);
+		for (const k of dead) {
+			store.delete(k);
+			vstore.delete(k);
+		}
 		await new Promise(resolve => {
 			tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
 		});

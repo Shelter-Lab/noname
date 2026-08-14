@@ -147,9 +147,13 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 			 */
 			function fetchLatestStamp() {
 				var controller = new AbortController();
+				// 【必须比 SW 侧那 8 秒长】pwa-sw.js 里这个请求走 Network-First 分支,自己也有 8 秒
+				// 超时 + 超时后的兜底逻辑。两边都写 8000 时,页面的计时器**先开始**(SW 要等 fetch
+				// 事件派发过去才起表),于是页面必然先 abort —— SW 那 8 秒的耐心和兜底整段成了死代码,
+				// 「慢网但连得上」这种情况必然报「联网检查失败」。给页面留 7 秒余量。
 				var timer = setTimeout(function () {
 					controller.abort();
-				}, 8000);
+				}, 15000);
 				return fetch("./pwa-version.json", { cache: "reload", signal: controller.signal })
 					.then(function (r) {
 						return r.ok ? r.json() : null;
@@ -195,15 +199,16 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					var codeKeys = await codeCache.keys();
 					// 【assets 用 null 表示"读不到",不要用 0】0 的含义是"库是空的",和"打不开"
 					// 是两种完全不同的故障,混成同一个数字就永远排查不出来(实测栽过)。
-					// 【顺带报基线条数】它和素材数一比就能立刻看出"基线声称有、实际没有"这种
-					// 撕裂状态 —— 那正是"检查更新恒报与线上一致"的成因。
+					// 【顺带报版本表条数】它和素材数一比就能看出有多少素材"版本未知"
+					// (升级前装进来的那些)—— 未知的没法参与比对,得先本地补算一遍。
+					// 版本表和素材表由 putAsset/putAssets 同事务写入,所以正常情况下两个数相等。
 					var assets = null;
-					var baselineCount = null;
+					var versionCount = null;
 					try {
 						var db = await import(/* @vite-ignore */ `${lib.assetURL}pwa-asset-db-esm.js`);
 						assets = await db.countAssets();
-						var b = await db.getBaseline();
-						baselineCount = b ? Object.keys(b).length : 0;
+						var v = await db.getVersions();
+						versionCount = v ? Object.keys(v).length : null;
 					} catch (e) {
 						/* 素材库模块都加载不了 → 保持 null,如实报"读不到" */
 					}
@@ -212,7 +217,7 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 						stale: Array.isArray(staleList) ? staleList.length : 0,
 						code: codeKeys.length,
 						assets: assets,
-						baseline: baselineCount,
+						versions: versionCount,
 					};
 				} catch (e) {
 					return null;
@@ -220,22 +225,25 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 			}
 
 			/**
-			 * 素材是否有更新:比对构建产出的内容哈希清单与本地基线,精确算出变更集。
+			 * 素材是否有更新:拿构建产出的内容哈希清单和本地版本表逐条比,精确算出变更集。
 			 *
-			 * 【为什么非得这么绕】素材存在 IndexedDB 里、键是 pathname。改了图但路径不变时,
-			 * 下载器的「跳过已有」判定它已存在就不再取,于是永远读旧字节 —— 这就是"卡面图不更新"
-			 * 的成因。而记录里只有 { buf, mime, len },没有 ETag,发不出 If-None-Match,
-			 * 想"校验"就只能把字节整个重下。代码没这问题:换版时 install 用 cache:"reload"
-			 * 整版重下核心清单,那条路绕开一切缓存;而素材不在核心清单里(image/card/ 的 581 张
-			 * 全在可下载清单),压根不走那条路。
-			 * 【为什么比清单不逐个问】1.4 万个素材逐个请求就是 1.4 万次往返;哈希清单一次下完
-			 * (约 600KB,CF 会 gzip),diff 出来就是精确的变更集,零多余流量。
-			 * 【基线为什么要本地算而不是直接存服务端清单】直接存服务端那份等于替本地撒谎:
-			 * 库里明明是旧字节,基线却声称与线上一致,之后永远 diff 不出差异。
-			 * 本地算能对上构建时的哈希,因为存进库的就是原始字节 —— 下载器用
-			 * `await r.arrayBuffer()`,SW 只在 resp.redirected 时重建 Response 且 body 原样搬。
+			 * 【为什么要本地版本表】素材存在 IndexedDB、键是 pathname。改了图但路径不变时,
+			 * 光看键无从判断新旧;而记录里只有 { buf, mime, len },没有 ETag,发不出
+			 * If-None-Match,想"校验"就只能把字节整个重下。代码没这问题:换版时 install 用
+			 * cache:"reload" 整版重下核心清单,那条路绕开一切缓存;而素材不在核心清单里
+			 * (image/card/ 的 581 张全在可下载清单),压根不走那条路。
+			 * 【为什么比清单不逐个问】1.4 万个素材逐个条件请求就是 1.4 万次往返;哈希清单
+			 * 一次下完(792KB,CF 会 gzip),diff 出来就是精确的变更集,零多余流量。
+			 * 【版本号为什么必须来自本地字节】直接抄服务端清单等于替本地撒谎:库里明明是旧字节,
+			 * 版本表却声称与线上一致,之后永远 diff 不出差异。写入路径(putAsset/putAssets)
+			 * 算的正是刚从网络拿到、即将入库的那份字节,天然对得上构建时的哈希。
 			 *
-			 * @returns {Promise<null | { changed: string[], added: string[], missingBaseline: boolean, db: any, hashes: Record<string,string> }>}
+			 * 三种结果分开报,因为解法完全不同:
+			 *   changed  = 版本号和线上不一样 → 要**联网重下**这几个
+			 *   unknown  = 素材在库里但版本号未知(升级前装进来的)→ **本地算一遍**即可,不联网
+			 *   added    = 库里压根没有 → 走「下载离线资源」补齐
+			 *
+			 * @returns {Promise<null | { changed: string[], added: string[], unknown: string[], dbUnreadable?: boolean, db: any, hashes: Record<string,string> }>}
 			 */
 			async function inspectAssets() {
 				let db;
@@ -261,12 +269,12 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					if (slash === -1) return true;
 					return CODE_DIRS.includes(rel.slice(0, slash));
 				};
-				var baseline = await db.getBaseline();
+				var versions = await db.getVersions();
 				var haveKeys = await db.getAssetKeys();
-				// 读不到(≠空)就别往下比 —— 否则 14403 个素材会被全部误判成"本地压根没有",
-				// 报成"另有 14403 个未下载",把真正的故障(素材库打不开)完全掩盖掉。
-				if (!haveKeys) {
-					return { changed: [], added: [], unknown: [], missingBaseline: !baseline, dbUnreadable: true, db: db, hashes: hashes };
+				// 【读不到(≠空)就别往下比】否则 14403 个素材会被全部误判成"本地压根没有",
+				// 报成"另有 14403 个未下载",把真正的故障(素材库打不开)完全掩盖掉 —— 实测栽过。
+				if (!haveKeys || !versions) {
+					return { changed: [], added: [], unknown: [], dbUnreadable: true, db: db, hashes: hashes };
 				}
 				var changed = [];
 				var added = [];
@@ -276,40 +284,18 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					if (isCode(clean)) continue;
 					var pathname = new URL(rel, location.href).pathname;
 					if (!haveKeys.has(pathname)) {
-						// 本地压根没有 → 归"新增"。这类原来就能靠「下载离线资源」补上,
-						// 这里只是把它一并报出来,让用户知道差多少。
 						added.push(rel);
 						continue;
 					}
-					if (!baseline) {
-						continue; // 压根没有基线 → 由 missingBaseline 那条路统一处理
-					}
-					if (!baseline[pathname]) {
-						// 【库里有、基线里没记录 → 无从判断新旧,必须报出来】原来这一格是**静默跳过**的:
-						// 既不算新增(库里有)、又不参与比较(基线无),于是「建立基线之后才装进来的素材」
-						// 永远隐形 —— 曹操传那 25 张卡面就这么卡了一整轮。根因是下载器不写基线;
-						// 现在下载器会补记(见 library/init/index.js 的 baselineAdd),这里留作兜底:
-						// 老基线里缺的那些重下一次就自愈了。
+					if (!versions[pathname]) {
 						unknown.push(rel);
 						continue;
 					}
-					if (baseline[pathname] !== hashes[rel]) {
+					if (versions[pathname] !== hashes[rel]) {
 						changed.push(rel);
 					}
 				}
-				return { changed: changed, added: added, unknown: unknown, missingBaseline: !baseline, db: db, hashes: hashes };
-			}
-
-			/** 下完之后把这批的哈希记进基线(只记真正写成功的) */
-			async function updateBaseline(db, hashes, urls, failedPaths) {
-				var baseline = (await db.getBaseline()) || {};
-				var failed = new Set(failedPaths || []);
-				for (var i = 0; i < urls.length; i++) {
-					var pathname = new URL(urls[i], location.href).pathname;
-					if (failed.has(pathname)) continue;
-					baseline[pathname] = hashes[urls[i]];
-				}
-				await db.saveBaseline(baseline);
+				return { changed: changed, added: added, unknown: unknown, db: db, hashes: hashes };
 			}
 
 			/**
@@ -438,58 +424,45 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					// —— 代码是最新的,再看素材有没有变更(改了图但路径不变的那种,代码检查看不见) ——
 					btn.textContent = "检查素材…";
 					var assetInfo = await inspectAssets();
-					if (assetInfo) {
-						if (assetInfo.missingBaseline) {
-							// 【首次:先建基线】没有基线就无从知道本地哪些图是旧的。基线只能本地算 ——
-							// 直接采信服务端清单等于替本地撒谎,之后永远 diff 不出差异。
-							// 这一步纯本地(读库 + SHA-256),不联网、不耗流量,但要把素材读一遍。
-							if (confirm("已是最新版本(v" + latest + ")。\n\n素材基线尚未建立 —— 建立后才能精确知道哪些立绘/卡面有更新(改了图但文件名不变的那种,版本号看不出来)。\n\n现在建立?\n\n· 纯本地计算,不联网、不耗流量\n· 需要把已缓存的素材读一遍算校验值,素材多时要等一会儿\n· 只需做这一次,之后每次检查都是几百 KB 的清单比对")) {
-								btn.textContent = "建立基线 0…";
-								var map = await assetInfo.db.computeBaseline(function (n, all) {
-									btn.textContent = "建立基线 " + n + "/" + all + "…";
+					if (assetInfo && !assetInfo.dbUnreadable) {
+						// 【先补版本号,再比对】unknown = 素材在库里、但版本表里没它。
+						// 只有一种来源:升级到版本表机制之前就装进来的老素材。之后所有写入
+						// 都由 putAsset/putAssets **同事务**记好版本号,不会再产生未知 ——
+						// 这正是把记账塞进写入函数里的目的(以前靠调用方自觉,三个入口忘了两个)。
+						// 这一步纯本地:读库 + SHA-256,不联网、不耗流量,而且只需做这一次。
+						if (assetInfo.unknown.length) {
+							if (confirm("已是最新版本(v" + latest + ")。\n\n有 " + assetInfo.unknown.length + " 个素材的版本号未知(升级前装进来的),要先本地算一遍,才能知道哪些立绘/卡面有更新(改了图但文件名不变的那种)。\n\n现在算?\n\n· 纯本地计算,不联网、不耗流量\n· 素材多时要等一会儿\n· 只需做这一次,之后每次检查都是几百 KB 的清单比对")) {
+								btn.textContent = "计算版本 0…";
+								await assetInfo.db.backfillVersions(function (n, all) {
+									btn.textContent = "计算版本 " + n + "/" + all + "…";
 								});
-								await assetInfo.db.saveBaseline(map);
-								// 建完立刻用新基线再比一次,把本来就旧的那些当场报出来
-								var again = await inspectAssets();
-								var n1 = again ? again.changed.length : 0;
-								if (n1 > 0 && confirm("基线已建立(" + Object.keys(map).length + " 个素材)。\n\n发现 " + n1 + " 个素材与线上不一致(本地是旧版本),现在更新?")) {
-									var r1 = await lib.init.downloadOfflineAssets(btn, { onlyList: again.changed, silent: true });
-									await updateBaseline(again.db, again.hashes, again.changed, r1 && r1.failed);
-									alert("已更新 " + ((r1 ? r1.done : 0)) + "/" + n1 + " 个素材。" + (r1 && r1.failed.length ? "\n有 " + r1.failed.length + " 个没写进本地库,再点一次可补。" : "\n重新打开应用后生效。"));
-								} else {
-									alert("基线已建立(" + Object.keys(map).length + " 个素材)。" + (n1 > 0 ? "" : "\n本地素材与线上一致。"));
-								}
-								return;
+								// 补完立刻用新版本表再比一次,把本来就旧的那些当场报出来
+								assetInfo = (await inspectAssets()) || assetInfo;
 							}
-							// 用户选择不建 → 继续走下面的常规提示
-						} else if (assetInfo.changed.length + assetInfo.unknown.length > 0) {
-							// 【changed 和 unknown 一起下】unknown 是"库里有但基线没记录",本地到底新
-							// 还是旧无从判断 —— 而重下一次的代价只是几十 KB,换来基线补齐、以后能精确比对。
-							var todo = assetInfo.changed.concat(assetInfo.unknown);
-							var msg = "已是最新版本(v" + latest + ")。\n\n";
-							if (assetInfo.changed.length) msg += "· " + assetInfo.changed.length + " 个素材有更新(立绘/卡面内容变了,文件名没变)\n";
-							if (assetInfo.unknown.length) msg += "· " + assetInfo.unknown.length + " 个素材没有基线记录(建立基线之后才装进来的),无从判断新旧\n";
-							msg += "\n现在下载这 " + todo.length + " 个?不动其余素材。";
-							if (confirm(msg)) {
-								var r2 = await lib.init.downloadOfflineAssets(btn, { onlyList: todo, silent: true });
-								await updateBaseline(assetInfo.db, assetInfo.hashes, todo, r2 && r2.failed);
-								alert("已更新 " + (r2 ? r2.done : 0) + "/" + todo.length + " 个素材。" + (r2 && r2.failed.length ? "\n有 " + r2.failed.length + " 个没写进本地库,再点一次可补。" : "\n重新打开应用后生效。"));
+						}
+						if (assetInfo.changed.length) {
+							var n2 = assetInfo.changed.length;
+							if (confirm("已是最新版本(v" + latest + ")。\n\n发现 " + n2 + " 个素材有更新(立绘/卡面的内容变了,文件名没变)。\n\n现在下载这 " + n2 + " 个?不动其余素材。")) {
+								var r2 = await lib.init.downloadOfflineAssets(btn, { onlyList: assetInfo.changed, silent: true });
+								// 【不需要在这里记版本号】下载器走 db.putAssets,字节和版本号同事务写入。
+								// 以前这里要手动 updateBaseline,而漏记正是“卡面永远查不出更新”的成因。
+								alert("已更新 " + (r2 ? r2.done : 0) + "/" + n2 + " 个素材。" + (r2 && r2.failed.length ? "\n有 " + r2.failed.length + " 个没写进本地库,再点一次可补。" : "\n重新打开应用后生效。"));
 								return;
 							}
 						}
 					}
 
-					// 一切正常。顺带把体检结果报出来 —— 以后再遇到"缓存好了怎么还慢",
+					// 一切正常。顺带把体检结果报出来 —— 以后再遇到“缓存好了怎么还慢”,
 					// 这一行就能直接说明是不是缓存问题,不用再靠猜。
-					// 【素材库和基线撕裂时必须点出来】基线条数远大于素材数 = 基线声称本地有这些图、
-					// 实际一张都没有 → 比对恒报"一致",而用户看到的是"图永远不更新"。
-					var torn = health && health.assets !== null && health.baseline > 0 && health.baseline > health.assets * 2 + 100;
+					// 【报“有多少素材还没记版本号”】素材数 − 已记版本数 = 升级前装进来的那些。
+					// 它们没法参与比对,得先本地补算一遍 —— 不报出来,用户只会看到“图永远不更新”。
+					var unknownVer = health && health.assets !== null && health.versions !== null ? Math.max(0, health.assets - health.versions) : 0;
 					alert(
 						"已是最新版本(v" + latest + ")。" +
 							(health
-								? "\n\n本地缓存:代码 " + health.code + " 个(Cache Storage)+ 素材 " + (health.assets === null ? "读不到(素材库打不开)" : health.assets + " 个") + (health.baseline === null ? "" : "，基线 " + health.baseline + " 条") + "\n代码版本 v" + health.stamp + "(一致,启动直接读缓存)"
+								? "\n\n本地缓存:代码 " + health.code + " 个(Cache Storage)+ 素材 " + (health.assets === null ? "读不到(素材库打不开)" : health.assets + " 个") + (health.versions === null ? "" : "，已记版本 " + health.versions + " 个") + "\n代码版本 v" + health.stamp + "(一致,启动直接读缓存)"
 								: "") +
-							(torn ? "\n\n⚠ 素材库与基线不一致:基线记着 " + health.baseline + " 条,素材库里只有 " + health.assets + " 个。\n素材应该是被清空过(配额回收/清理网站数据)。请点「下载离线资源」重新装一遍,装完基线会自动对齐。" : "") +
+							(unknownVer > 20 ? "\n\n⚠ 有 " + unknownVer + " 个素材的版本号未知(升级前装进来的)。再点一次「检查更新」可本地补算,算完才能知道它们是不是旧的。" : "") +
 							(assetInfo ? (assetInfo.dbUnreadable ? "\n素材:无法比对(素材库打不开)" : "\n素材:与线上一致" + (assetInfo.added.length ? "(另有 " + assetInfo.added.length + " 个未下载,可用「下载离线资源」补齐)" : "")) : "")
 					);
 				} catch (e) {
