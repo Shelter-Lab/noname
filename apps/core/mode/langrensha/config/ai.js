@@ -145,9 +145,17 @@ function beliefAttitude(from, to, guess) {
 	// 后果是死了狼之后会偏多疑——这不是作弊，是信息不足下的高估，正好抵掉好人前期过于保守
 	const langRatio = unknown > 0 ? Math.max(0, Math.min(1, (totalLangCount() - knownLang) / unknown)) : 0;
 	const base = campAttitude(myCamp, "lang") * langRatio + campAttitude(myCamp, "ren") * (1 - langRatio);
-	// 一无所知时给个"越强越该压制"的极小偏置。否则所有人分数完全相同，
-	// ai.basic.chooseTarget 的 check(best)<=0 分支会让 AI 集体空过（basic.js:223）
-	return base - Math.min(0.4, (to.hp + to.countCards("h") / 2) * 0.04);
+	// 【期望为正时必须压到 0】狼占比低于约 43% 时（普通板 9/10 人、觉孤板 6/9 人都是这样），
+	// 上面这个期望值会翻正 —— 数学上没错（陌生人大概率是好人），但后果是好人把所有陌生人
+	// 当盟友，白天一张【杀】都不出，而这个模式的好人只能靠白天出杀赢，直接成死局。
+	// 所以取"不了解的人最多算中立、不能算盟友"：压到 0 以内。
+	// 代价是丢掉"人越多越放心"这层细腻度，但那层细腻度产出的是不可用的正值，不值得留。
+	const capped = Math.min(base, 0);
+	// 再减一个"越强越该压制"的偏置和一个极小常数，保证一定为负且目标之间有区分度。
+	// 否则所有人分数完全相同，ai.basic.chooseTarget 在 check(best)<=0 时会让 AI 集体空过
+	// （basic.js:223），或者全都同分导致选谁纯看座位顺序。
+	const threat = Math.min(0.4, (to.hp + to.countCards("h") / 2) * 0.04);
+	return capped - threat - 0.1;
 }
 
 /**
