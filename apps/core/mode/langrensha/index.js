@@ -459,14 +459,22 @@ export default () => ({
 				return;
 			}
 			// 单机：把 randomMapOL 里跟客户端无关的那部分自己补上。
-			// lib.playerOL 只在 game.createServer()/客户端 init 里初始化过，单机是 undefined，
-			// 而 chooseButtonOL 按 playerid 索引结果、chooseCharacterOL 又要靠 lib.playerOL[id]
-			// 反查回玩家（还有 getState/updateState），所以这两样必须先备好。
-			// player.getId() 在 connectMode 下会直接 return，且它填的是 game.playerMap，
-			// 不是这里要的 lib.playerOL，故手动发号。
+			//
+			// 【两张表都要填，缺一不可 —— 这里踩过一次】core 里有 70 处
+			// `(_status.connectMode ? lib.playerOL : game.playerMap)[id]` 的双路写法：
+			//   · lib.playerOL   —— 联机侧按 id 反查玩家。本模式的 chooseButtonOL（按 playerid 索引
+			//     结果）、chooseCharacterOL（lib.playerOL[id].init）、getState/updateState 都要它；
+			//     而它只在 game.createServer() / 客户端 init 里初始化过，单机是 undefined。
+			//   · game.playerMap —— 单机侧按 id 反查玩家，由 player.getId() 填。
+			// 先前只填了 lib.playerOL，于是单机下所有走 playerMap 的分支都拿到 undefined。
+			// 最直接的表现：出牌的弃牌动画里
+			// `owner = (connectMode ? lib.playerOL : game.playerMap)[id]`（content.ts:9741）拿到
+			// undefined，紧接着 owner.$throw(throws) 抛 TypeError，把整个 useCard 打断 ——
+			// 牌没被消耗、AI 重新决策又选同一张，就是"同一动作无限重复、手牌数不变"。
 			lib.playerOL ??= {};
 			for (const current of game.players) {
-				current.playerid ??= get.id();
+				// getId() 只在非 connectMode 下生效（正是单机），它会发号并登记进 game.playerMap
+				current.getId();
 				lib.playerOL[current.playerid] = current;
 			}
 			game.chooseCharacterOL();
