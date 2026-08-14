@@ -523,6 +523,15 @@ export default () => ({
 			if (langs.length && Math.random() < 0.5) {
 				langs.randomGet().ai.swFakeSeerEarly = true;
 			}
+			// 真预言家的起跳时机也要带随机：约三成的局里压一轮再跳（隐真）。
+			// 【为什么两边都要随机】只给狼加先手不够 —— 真预言家若永远第一轮立刻跳，
+			// "第一天最先开口的是真的"就又成了铁律。两边的时机逻辑必须对称才没有信息可读。
+			// 压着不说也有代价：一旦有人抢跳预言家，真的就必须出来对冲（见 _sw_talkSkill 的 filter）。
+			for (const current of game.players) {
+				if (current.getAbility() === "yvyanjia" && Math.random() < 0.3) {
+					current.ai.swSeerDelay = 1;
+				}
+			}
 
 			game.syncState();
 

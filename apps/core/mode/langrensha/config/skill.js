@@ -19,6 +19,21 @@ const SW_TALK = {
 	金水后续: ["{0} 金水", "昨晚验的 {0}，好人", "我验了 {0}，是好人", "{0} 是好人，不用查了"],
 };
 
+/**
+ * 冒充预言家时挑"查杀谁"用的威胁度。
+ *
+ * 【为什么不能直接用态度排序】rawAttitude 里的威胁项只是 (血 + 手牌/2) * 0.04，
+ * 而开局所有人都是 4 血 4 牌 —— 完全同分，sort 退化成按座位取第一个，于是"狼总是点
+ * 某个位置的人"又成了一条固定行为模式。
+ * get.threaten 才是本体的威胁度口径：把目标身上每个技能声明的 ai.threaten 乘起来，
+ * 也就是"武将技能有多强"。第三参不传 —— 传了它会把残血算成"更好打"（get.effect 用的是
+ * 那个语义），而这里要的是"谁最该被除掉"，方向相反。
+ * 最后加一点随机打散近似平手，免得同强度的人里又固定挑同一个。
+ */
+function swThreat(target, viewer) {
+	return get.threaten(target, viewer) * 2 + target.hp * 0.3 + target.countCards("h") * 0.2 + Math.random() * 0.5;
+}
+
 /** 从池子里随机取一句并填名字。这里的随机是纯展示用，不影响任何判定 */
 function swTalkLine(kind, first, name) {
 	const pool = SW_TALK[kind + (first ? "首次" : "后续")];
@@ -514,8 +529,22 @@ export default {
 			}
 			const ability = player.getAbility();
 			if (ability === "yvyanjia") {
-				// 有还没报过的验人结果就报。已报条数记在 swState 上（一个计数，没有隐私）
-				return player.getStorage("sw_yvyanjiaInsight").length > (player?.swState?._saidInsight || 0);
+				// 没有还没报过的新结果就不说话。已报条数记在 swState 上（一个计数，没有隐私）
+				if (player.getStorage("sw_yvyanjiaInsight").length <= (player?.swState?._saidInsight || 0)) {
+					return false;
+				}
+				// 已经起跳过了：之后天天报
+				if (player?.swState?._saidInsight) {
+					return true;
+				}
+				// 还没起跳。【为什么真预言家也要有晚跳】否则真预言家永远第一轮立刻跳，
+				// "第一天最先开口的是真的"又成了铁律 —— 和狼那边的"后跳必假"是同一类漏洞，
+				// 两边的时机逻辑必须都带随机才对称。骰子同样在 index.js 的 start 里掷。
+				// 但有人抢跳了预言家就必须出来对冲，压着不说等于把话语权让给假的。
+				if (Array.isArray(_status.swClaims) && _status.swClaims.some(one => one.player !== player)) {
+					return true;
+				}
+				return game.roundNumber > (player.ai?.swSeerDelay || 0);
 			}
 			if (ability === "lang") {
 				// 一局只有一头狼冒充：两头狼都跳预言家等于自曝
@@ -570,8 +599,8 @@ export default {
 					target = mates.randomGet();
 					kind = "金水";
 				} else if (others.length) {
-					// 查杀挑"最想让他死的"那个
-					others.sort((x, y) => get.attitude(player, x) - get.attitude(player, y));
+					// 查杀挑威胁最大的（见 swThreat 的注释：不能用态度排，开局会同分）
+					others.sort((x, y) => swThreat(y, player) - swThreat(x, player));
 					target = others[0];
 					kind = "查杀";
 				} else if (mates.length) {
