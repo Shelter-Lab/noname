@@ -182,6 +182,17 @@ export function rawAttitude(from, to) {
 	if (guess.confidence >= 1) {
 		return trueAttitude(from, to);
 	}
+	// 【tempIgnore：本体的"别再针对同一个人"机制，必须读】
+	// player.useCard / useSkill 每次出牌都会把态度落在 [-1, 0) 的目标塞进 from.ai.tempIgnore
+	// （player.js:7736、7805），每人回合开始时清空（content.ts:3362）。它的用途就是让 AI
+	// 一个回合内不要死盯一个人 —— 国战的 rawAttitude 就是靠返回 0 来实现的
+	// （guozhan/src/patch/get.js:299）。
+	// 本模式尤其踩得准：未知玩家的态度稳定在 -0.34 左右，正好每次都落进那个区间，
+	// 于是 tempIgnore 一直在积累却没人读，AI 就会一轮又一轮对同一个目标出同一种牌。
+	// 返回 0 让 -attitude 归零，AI 本回合就会转去看别人（回合结束自动解除）。
+	if (_status.currentPhase === from && from.ai?.tempIgnore?.includes(to)) {
+		return 0;
+	}
 	// 行为暴露度决定真实阵营能透出多少，其余份额交给推定/先验
 	const shown = Math.max(0, Math.min(0.95, to.ai.shown || 0));
 	let att = trueAttitude(from, to) * shown + beliefAttitude(from, to, guess) * (1 - shown);
