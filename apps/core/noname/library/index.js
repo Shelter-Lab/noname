@@ -26,32 +26,6 @@ import skills from "./skill.js";
 
 const html = dedent;
 
-/**
- * 狼人杀的板子与规则说明。
- *
- * 单机菜单在模式文件加载【之前】就要渲染配置项，而 mode/langrensha/index.js 的 getRule()
- * 是模式运行时才装到 game 上的，菜单取不到 —— 故这里自带一份。
- * 【改文案时两处要一起改】：本函数 + mode/langrensha/index.js 的 getRule()。
- */
-function getLangrenshaRule() {
-	return (
-		`<b>普通板</b>（8人）：2狼1狼王 / 2民1预1女1猎` +
-		`<br><b>觉孤板</b>：10人为 2狼1狼王1白狼 / 2民1预1女1猎1觉孤；8人则去掉白狼和1民` +
-		`<br>身份全程不公开。` +
-		`<br><b>屠城</b>：好人全部阵亡则狼人获胜。<b>屠边</b>：神职（预/女/猎）或平民，任一类全灭即狼人获胜。` +
-		`<br>（板子名后面标的屠边/屠城只是推荐搭配，实际以「游戏结束方式」为准，两项互不联动。）` +
-		`<br><br><b>预言家</b>：每轮开始时，你可以查看一名未以此法查看过的其他玩家的阵营。` +
-		`<br><b>猎人</b>：死亡后可以对一名其他角色造成等同于猎人体力上限点伤害。` +
-		`<br><b>女巫</b>：每局游戏限一次，非首轮游戏开始时，可以选择复活/毒杀一名其他角色。（均为3体力）` +
-		`<br><b>觉醒孤独少女</b>：首轮开始时须选择一名其他角色成为自己的偶像并加入平民阵营。偶像若因为狼刀或者狼人击杀死亡，则你继承偶像的阵营和技能；偶像若因为你击杀死亡，则你变为中立阵营且视为游戏目标失败；其他原因死亡，你加入狼人阵营且初始狼刀伤害为0。` +
-		`<br><b>平民</b>：可以摸鱼。` +
-		`<br><br><b>狼人阵营</b>：游戏开始前知晓其他狼人的身份，每轮开始时可以暗中选择一名玩家，使其流失X点体力（不触发技能）。狼人死亡后会随机将每轮狼刀伤害转移增加给队友。` +
-		`<br><b>狼人</b>：每轮1狼刀伤害。` +
-		`<br><b>狼王</b>：每轮1狼刀伤害。游戏开始前，若狼刀总数小于4，则改为2狼刀伤害。` +
-		`<br><b>白狼</b>：每轮1狼刀伤害。死亡后可以对一名其他角色造成等同于白狼体力上限点伤害。` +
-		`<br><b>隐狼</b>：被查验结果为好人，和狼人队友互相不可见。每轮1狼刀伤害，在其他狼人全部死亡前无法获得转移狼刀。（规则与 AI 都已实现，但现有两个板子都不含隐狼，实战不会出现）`
-	);
-}
 
 export class Library {
 	configprefix = "noname_0.9_";
@@ -8770,29 +8744,9 @@ export class Library {
 			splash: "image/splash/style1/langrensha.jpg",
 			// 曾经这里是 onlineOnly: true（单机列表灰显"仅联机"）。现在夜间六个身份都有 AI
 			// （mode/langrensha/config/ai.js），单机的分身份+选将也补齐了，故解除标注。
-			// 两项共用的展开/收起。挂在 mode 上而不是各写一份，免得改一处漏一处。
-			// 【为什么返回值要留意】clickToggle 里 `onclick(...) === false` 会把 .on 状态回滚，
-			// 所以这里绝不能返回 false，否则点一下就被自己撤销、看起来像没反应。
-			toggleNotice: function (node, opened) {
-				var box = node.querySelector(".langrensha-notice-body");
-				if (!opened) {
-					if (box) box.remove();
-					return;
-				}
-				if (box) return;
-				var cfg = node._link && node._link.config;
-				var text = cfg && cfg.intro;
-				if (typeof text === "function") text = text();
-				box = document.createElement("div");
-				box.className = "langrensha-notice-body";
-				// 菜单里那条 `.menu-buttons div { position: absolute }` 会把普通 div 糊成一坨
-				// （README-PWA 里记过这个坑），所以显式改回 relative。
-				box.setAttribute("style", "position:relative;margin-top:6px;font-size:14px;line-height:1.7;text-align:left;white-space:normal;opacity:.85;");
-				box.innerHTML = text || "";
-				node.appendChild(box);
-				// 文字展开后行高会超出默认的固定高度，撑开容器免得被裁掉
-				node.style.height = "auto";
-			},
+			// 曾经还有个 toggleNotice：给配置栏里那两条「点此展开」的说明条插/删说明块用的。
+			// 说明已挪到「其它 → 帮助 → 狼人杀」（挂在 mode/langrensha/index.js 的 help 字段上），
+			// 没有调用者了，一并删掉。
 			connect: {
 				connect_langrensha_mode: {
 					name: "游戏模式",
@@ -8970,23 +8924,11 @@ export class Library {
 						}
 					},
 				},
-				// 【这项是说明文字，不是开关 —— 必须带 clear:true】
-				// 不带 clear 会走 createConfig 的默认分支，而那条分支对"没有 item/range/input"的项
-				// 一律画成布尔 toggle：纯说明会被渲染成一个可拨的开关，用户以为拨了会改规则，
-				// 实际上没有 init 也没有 onclick，拨动只是往 localStorage 写一个没人读的键。
-				// 早先版本就是这样，误导过人（"打开后和不打开有什么差别"——答案是没差别）。
-				// clear:true 走 menu/index.js 的另一条分支：只画一行文字 + 挂 clickToggle，
-				// 由 onclick 收到展开状态、自己插/删说明块 —— 即"点一下展开详情"，
-				// 与「网页扩展」里那个详细说明按钮同一个交互。
-				// 代价是 clear 分支跳过 lib.setIntro（长按弹框没了），故改由点击展开，信息不丢。
-				langrensha_rule: {
-					name: "板子与规则（点此展开）",
-					clear: true,
-					intro: getLangrenshaRule,
-					onclick: function (opened) {
-						return lib.mode.langrensha.toggleNotice(this, opened);
-					},
-				},
+				// 规则说明不放这儿了 —— 挪到「其它 → 帮助 → 狼人杀」，跟身份/谋攻模式一致
+				// （挂在 mode/langrensha/index.js 的 help 字段上）。
+				// 好处不只是选项栏干净：那边能直接复用模式自己的 getRule()，于是这里原本为了
+				// "菜单比模式文件先渲染、取不到 getRule()" 而自带的那份重复文案可以整个删掉，
+				// 规则从此只有一处事实源。
 			},
 		},
 	};

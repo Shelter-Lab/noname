@@ -1312,6 +1312,15 @@ export default () => ({
 		},
 	},
 
+	// 其它 → 帮助 里的条目。身份/谋攻等模式都是这么挂的（identity.js:5213），
+	// switchMode 会把它合并进 lib.help（game/index.js 里那圈"其余字段并进 lib"的循环），
+	// 而一次只加载一个模式，所以天然只在玩狼人杀时出现。
+	// 内容直接复用 getRule()，不再另写一份 —— 本模式的规则文案已经有两处要手动同步
+	// （getRule + library/index.js 的 getLangrenshaRule），别再添第三处。
+	help: {
+		狼人杀: getRule(),
+	},
+
 	skill,
 	translate,
 });
