@@ -281,6 +281,23 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 				};
 				var versions = await db.getVersions();
 				var haveKeys = await db.getAssetKeys();
+				// 【必须把代码桶的键也算进"已有"】核心清单里有 104 个**非代码**文件
+				// (12 张模式启动图、卡背/血条/边框主题图、suits/motoyamaru 字体、ol_bg.jpg…),
+				// 它们由 install 预缓存进 **Cache Storage 代码桶**,压根不进 IDB。
+				// 只看 IDB 的话它们会被当成"未下载"报出来,而下载器的 cachedSet 是
+				// **代码桶 ∪ IDB**,它会跳过这些 —— 于是出现"检查更新说还差 41 个、
+				// 点下载却说已经完整"这种两边都没错、但互相矛盾的报告。两边必须同一个判据。
+				// (开代码桶很便宜:就 738 条,拆桶就是为了这个。)
+				var codeKeys = new Set();
+				try {
+					var cc = await caches.open("noname-code-v1");
+					var ccKeys = await cc.keys();
+					for (var ci = 0; ci < ccKeys.length; ci++) {
+						codeKeys.add(new URL(ccKeys[ci].url).pathname);
+					}
+				} catch (e) {
+					/* 开不了就当代码桶为空:最坏多报几个"未下载",不会漏报变更 */
+				}
 				// 【读不到(≠空)就别往下比】否则 14403 个素材会被全部误判成"本地压根没有",
 				// 报成"另有 14403 个未下载",把真正的故障(素材库打不开)完全掩盖掉 —— 实测栽过。
 				if (!haveKeys || !versions) {
@@ -294,7 +311,12 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					if (isCode(clean)) continue;
 					var pathname = new URL(rel, location.href).pathname;
 					if (!haveKeys.has(pathname)) {
-						added.push(rel);
+						// 代码桶里有 → 已经缓存了(install 预缓存的那批),不算未下载。
+						// 也不参与哈希比对:它们由 install 的 cache:"reload" 整版重下负责,
+						// 每次换版必定是新的,根本不需要这套增量机制。
+						if (!codeKeys.has(pathname)) {
+							added.push(rel);
+						}
 						continue;
 					}
 					if (!versions[pathname]) {
