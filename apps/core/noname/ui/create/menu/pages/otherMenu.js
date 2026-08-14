@@ -473,7 +473,77 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 					btn.disabled = false;
 				}
 			});
+			// 【为什么要专门一个诊断按钮】"图不更新"查了好几轮,每轮都卡在同一个地方:
+			// 手上只有"素材库打不开"这么一句,而它背后至少十几种原因(被占住/
+			// 版本升级失败/store 不存在/隐私模式禁用 IDB/配额被回收…),只能靠猜。
+			// 这个按钮把**真实错误**和**现场重算的本地哈希**一并报出来 ——
+			// 重算哈希是关键:它绕开"版本表是否可信"这个前提,直接回答
+			// "我手上这张图到底是不是线上那张"。不联网也能跑(清单拿不到就只报本地部分)。
+			var diagBtn = ui.create.node("button", "素材库诊断", async function () {
+				var b = this;
+				b.disabled = true;
+				b.textContent = "诊断中…";
+				var out = [];
+				try {
+					var db = null;
+					try {
+						db = await import(/* @vite-ignore */ `${lib.assetURL}pwa-asset-db-esm.js`);
+					} catch (e) {
+						alert("素材库模块都加载不了:" + (e && e.message ? e.message : e));
+						return;
+					}
+					var cnt = await db.countAssets();
+					var keys = await db.getAssetKeys();
+					var vers = await db.getVersions();
+					var err = db.getLastDbError ? db.getLastDbError() : null;
+					out.push("素材数: " + (cnt === null ? "读不到" : cnt));
+					out.push("键数  : " + (keys === null ? "读不到" : keys.size));
+					out.push("版本数: " + (vers === null ? "读不到" : Object.keys(vers).length));
+					out.push("错误  : " + (err || "无"));
+					// 线上清单(拿不到不影响本地部分)
+					var hashes = null;
+					try {
+						var hr = await fetch("./pwa-asset-hashes.json", { cache: "no-cache" });
+						if (hr.ok) hashes = await hr.json();
+					} catch (e2) {
+						/* 离线就算了 */
+					}
+					out.push("线上清单: " + (hashes ? Object.keys(hashes).length + " 条" : "拿不到"));
+					out.push("");
+					// 取几张曹操传卡面逐张对账
+					var samples = ["ccz_chixiaojian", "ccz_yuxi", "ccz_baihubaoyu", "ccz_jingkai", "ccz_fangtianhuaji"];
+					for (var i = 0; i < samples.length; i++) {
+						var rel = "./image/card/" + samples[i] + ".png";
+						var pn = new URL(rel, location.href).pathname;
+						var online = hashes ? hashes[rel] || "-" : "?";
+						var recorded = vers ? vers[pn] || "无记录" : "?";
+						var raw = db.getAssetRaw ? await db.getAssetRaw(pn) : null;
+						var actual = "库里没有";
+						if (raw) {
+							try {
+								actual = await db.sha16(raw.buf);
+							} catch (e3) {
+								actual = "算不了";
+							}
+						}
+						var verdict = actual === online ? "✓新" : raw ? "✗旧" : "—";
+						out.push(samples[i].replace("ccz_", "") + " " + verdict);
+						out.push("  线上 " + online);
+						out.push("  字节 " + actual + (raw ? " (" + raw.len + "B)" : ""));
+						out.push("  记的 " + recorded + (raw && recorded !== actual && recorded !== "无记录" ? "  ⚠账实不符" : ""));
+					}
+					console.log("[素材库诊断]" + "\n" + out.join("\n"));
+					alert(out.join("\n"));
+				} catch (e) {
+					alert("诊断本身报错:" + (e && e.message ? e.message : e) + "\n" + "\n" + out.join("\n"));
+				} finally {
+					b.textContent = "素材库诊断";
+					b.disabled = false;
+				}
+			});
+			diagBtn.style.marginLeft = "6px";
 			updateCheckPx.appendChild(checkUpdateBtn);
+			updateCheckPx.appendChild(diagBtn);
 			updateCheckPx.appendChild(versionSpan);
 			ul.appendChild(updateCheckPx);
 		}

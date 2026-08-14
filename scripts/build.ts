@@ -222,7 +222,7 @@ console.log("生成 PWA 资源清单");
 	// 于是 classic 版直接用,ESM 版在末尾补一行 export —— 逻辑只有一处,不会两边走样。
 	const dbSource = await fs.readFile("apps/core/pwa-asset-db.js", "utf8");
 	await fs.writeFile("dist/pwa-asset-db.js", dbSource);
-	const dbExports = ["openAssetDB", "readAsset", "putAsset", "putAssets", "getAssetKeys", "countAssets", "pruneAssets", "guessMime", "getVersions", "backfillVersions", "sha16"];
+	const dbExports = ["openAssetDB", "readAsset", "putAsset", "putAssets", "getAssetKeys", "countAssets", "pruneAssets", "guessMime", "getVersions", "backfillVersions", "sha16", "getLastDbError", "getAssetRaw", "migrateLegacyBaseline"];
 	for (const name of dbExports) {
 		if (!new RegExp(`function ${name}\\b`).test(dbSource)) {
 			throw new Error(`pwa-asset-db.js 里找不到 ${name}——ESM 版会导出一个不存在的名字,页面侧 import 直接报错`);

@@ -46,54 +46,43 @@ const VSTORE = "versions";
 
 let dbPromise = null;
 
+// 【为什么要存最后一个错误】这些读函数对外统一返回 null(“读不到”),
+// 但“读不到”有十几种原因(被占住/版本升级失败/store 不存在/隐私模式禁用 IDB…),
+// 先前就因为只能看到“打不开”而连猜了几轮。把真实错误存下来、在体检里报出去。
+let lastError = null;
+
+/** 最后一次失败的真实原因(供「检查更新」展示);从未失败过则 null */
+function getLastDbError() {
+	if (!lastError) {
+		return null;
+	}
+	const e = lastError;
+	return e.name ? e.name + ": " + (e.message || "") : String(e);
+}
+
 /**
  * 打开(或首次创建)素材库。
- * 【记忆化】一次 SW/页面生命周期只 open 一次。这不是为了省那几毫秒,而是避免
+ * 【记忆化】一个 SW/页面生命周期只 open 一次。这不是为了省那几毫秒,而是避免
  * 并发 open 撞上 versionchange 相互阻塞。
  */
 function openAssetDB() {
 	if (!dbPromise) {
 		dbPromise = new Promise((resolve, reject) => {
 			const rq = indexedDB.open(DB_NAME, DB_VERSION);
-			rq.onupgradeneeded = event => {
+			rq.onupgradeneeded = () => {
+				// 【升级里只建表,绝不干重活】上一版把“把老基线 14403 行摄平进版本表”
+				// 放在这里做 —— 那是个陷:versionchange 事务一旦因任何原因 abort
+				// (配额/WebKit 的 IDB 间歇失败/写量太大),**整个 open 就失败**,
+				// 而库仍停在 v1 —— 于是之后每次 open(v2) 都重跑同一个升级、都失败,
+				// 变成**永久打不开**。建表本身是 O(1) 的,摄平改成事后惰性做
+				// (migrateLegacyBaseline),它失败也只是“版本未知”,本地补算一遍就行。
 				const db = rq.result;
-				if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
-				if (db.objectStoreNames.contains(VSTORE)) {
-					return;
+				if (!db.objectStoreNames.contains(STORE)) {
+					db.createObjectStore(STORE);
 				}
-				db.createObjectStore(VSTORE);
-				// 【v1 → v2 迁移:把老的单条基线摊平进版本表】用户建过基线的话就不必重算 1GB。
-				// 在 versionchange 事务里读写都是同步 API,嵌套请求会把事务保持到做完为止。
-				// 没建过基线的用户这里什么都不做 —— 素材的版本记作"未知",由
-				// backfillVersions() 在用户点检查更新时本地算一遍补上(不联网)。
-				// 【oldVersion 为 0 = 全新库】没有旧基线可摊,直接跳过。
-				if (event.oldVersion < 1) {
-					return;
+				if (!db.objectStoreNames.contains(VSTORE)) {
+					db.createObjectStore(VSTORE);
 				}
-				// 【统一用 rq.transaction.objectStore 取句柄】createObjectStore 的返回值也能用,
-				// 但它的生命周期绑在这个 versionchange 事务上、又要跨到下面的异步回调里去用,
-				// 容易看不清;从事务上现取则语义无歧义。
-				const tx = rq.transaction;
-				const getOld = tx.objectStore(STORE).get(LEGACY_BASELINE_KEY);
-				getOld.onsuccess = () => {
-					const map = getOld.result && getOld.result.map;
-					if (!map) {
-						return;
-					}
-					const vstore = tx.objectStore(VSTORE);
-					for (const path in map) {
-						vstore.put(map[path], path);
-					}
-					// 摊平完就把这条 800KB 的大记录删掉 —— 它同时也是 prune 的保留键,
-					// 留着只会继续制造"账实不符"的可能。
-					tx.objectStore(STORE).delete(LEGACY_BASELINE_KEY);
-				};
-				// 迁移失败不能让整个 open 失败:版本表留空 = 全部"版本未知",
-				// backfillVersions 本地算一遍就补上了,不影响素材可读。
-				getOld.onerror = event2 => {
-					event2.preventDefault();
-					event2.stopPropagation();
-				};
 			};
 			rq.onsuccess = () => {
 				const db = rq.result;
@@ -108,17 +97,68 @@ function openAssetDB() {
 				resolve(db);
 			};
 			rq.onerror = () => {
+				lastError = rq.error || new Error("indexedDB.open 失败");
 				dbPromise = null; // 失败不要粘住,下次还能重试
-				reject(rq.error);
+				reject(lastError);
 			};
-			// 被别的连接挡住:不 reject,等它让开(onsuccess 仍会来)。卡死也无所谓 ——
-			// 调用方都有 try/catch 回退到 Cache Storage。
-			rq.onblocked = () => {};
+			// 【被占住不能永久悬着】旧写法是空函数 + 注释“卡死也无所谓”—— 那是错的:
+			// 调用方 await 的是这个记忆化 promise,它永不结束就是**整个素材库接口镀死**,
+			// 而且 try/catch 接不到悬着的 promise。给它一个上限,如实报错。
+			// (正常情况下对方的 onversionchange 会立刻 close,这个定时器根本不会到点。)
+			rq.onblocked = () => {
+				setTimeout(() => {
+					if (rq.readyState === "done") {
+						return;
+					}
+					lastError = new Error("素材库被另一个连接占住(onblocked),等待超时");
+					dbPromise = null;
+					reject(lastError);
+				}, 8000);
+			};
 		});
 	}
 	return dbPromise;
 }
 
+/**
+ * 把 v1 时代那条单 record 基线摄平进版本表(惰性、一次性)。
+ * 用普通 readwrite 事务做 —— 失败不影响库可用性,最坏是“版本未知”。
+ * @returns {Promise<number>} 摄平了几条
+ */
+async function migrateLegacyBaseline() {
+	try {
+		const db = await openAssetDB();
+		const rec = await req(db.transaction(STORE, "readonly").objectStore(STORE).get(LEGACY_BASELINE_KEY));
+		const map = rec && rec.map;
+		if (!map) {
+			return 0;
+		}
+		const paths = Object.keys(map);
+		// 分批写,别把 14403 条塞进一个事务 —— 一旦 abort 就全白干
+		const BATCH = 2000;
+		for (let i = 0; i < paths.length; i += BATCH) {
+			const tx = db.transaction(VSTORE, "readwrite");
+			const vs = tx.objectStore(VSTORE);
+			for (const path of paths.slice(i, i + BATCH)) {
+				vs.put(map[path], path);
+			}
+			await new Promise(resolve => {
+				tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+			});
+		}
+		// 摄平完把这条 800KB 的大记录删掉 —— 它同时也是 prune 的保留键,
+		// 留着只会继续制造“账实不符”的可能。
+		const txd = db.transaction(STORE, "readwrite");
+		txd.objectStore(STORE).delete(LEGACY_BASELINE_KEY);
+		await new Promise(resolve => {
+			txd.oncomplete = txd.onerror = txd.onabort = () => resolve();
+		});
+		return paths.length;
+	} catch (e) {
+		lastError = e;
+		return 0;
+	}
+}
 /** 把 IDBRequest 包成 Promise(IDB 是事件式 API,全靠这个转换) */
 function req(r) {
 	return new Promise((resolve, reject) => {
@@ -297,20 +337,31 @@ const RESERVED_KEYS = new Set([LEGACY_BASELINE_KEY]);
 async function getVersions() {
 	try {
 		const db = await openAssetDB();
-		const tx = db.transaction(VSTORE, "readonly");
-		const store = tx.objectStore(VSTORE);
-		// 每条只是 16 字符的字符串,getAll 整取回来几百 KB —— 不像素材表那样有 1.16GB 的顾虑
-		const [keys, values] = await Promise.all([req(store.getAllKeys()), req(store.getAll())]);
-		const map = {};
-		for (let i = 0; i < keys.length; i++) {
-			map[keys[i]] = values[i];
+		const read = async () => {
+			const store = db.transaction(VSTORE, "readonly").objectStore(VSTORE);
+			// 每条只是 16 字符的字符串,getAll 整取回来几百 KB —— 不像素材表那样有 1.16GB 的顾虑
+			const [keys, values] = await Promise.all([req(store.getAllKeys()), req(store.getAll())]);
+			const map = {};
+			for (let i = 0; i < keys.length; i++) {
+				map[keys[i]] = values[i];
+			}
+			return map;
+		};
+		let map = await read();
+		// 【空表时惰性摄平老基线】迁移故意不在 onupgradeneeded 里做(那里 abort 会让
+		// 整个 open 永久失败),改成第一次真正读版本表时才做。失败也只是继续
+		// "全部版本未知",本地补算一遍就行,库照样能读。
+		if (!Object.keys(map).length) {
+			if (await migrateLegacyBaseline()) {
+				map = await read();
+			}
 		}
 		return map;
-	} catch {
+	} catch (e) {
+		lastError = e;
 		return null;
 	}
 }
-
 /**
  * 给"素材在库里但版本号未知"的那些补算版本号(纯本地,不联网)。
  * 只有两种来源:① v1 时代从没建过基线的老库;② 迁移时基线本身就缺的那些条目。
@@ -365,13 +416,30 @@ async function backfillVersions(onProgress) {
 // 体检却说素材 0 个」,而 0 到底是真空还是读不到,当时无从判断,只能靠猜。
 // 调用方必须显式处理 null(见 otherMenu 的 inspectCache / inspectAssets)。
 
+/**
+ * 读一条素材的原始字节 + 存的 MIME。只给诊断用 ——
+ * 它能现场重算本地字节的哈希,回答"我手上这份到底是不是新的",
+ * 绕开"版本表是否可信"这个前提。读不到返回 null。
+ */
+async function getAssetRaw(pathname) {
+	try {
+		const db = await openAssetDB();
+		const rec = await req(db.transaction(STORE, "readonly").objectStore(STORE).get(pathname));
+		return rec && rec.buf ? { buf: rec.buf, mime: rec.mime, len: rec.len } : null;
+	} catch (e) {
+		lastError = e;
+		return null;
+	}
+}
+
 /** 库里已有哪些 pathname —— 用 getAllKeys 一次取回,别逐条 get 探测。读不到返回 null */
 async function getAssetKeys() {
 	try {
 		const db = await openAssetDB();
 		const keys = await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
 		return new Set(keys.filter(k => !RESERVED_KEYS.has(k)));
-	} catch {
+	} catch (e) {
+		lastError = e;
 		return null;
 	}
 }
@@ -383,7 +451,8 @@ async function countAssets() {
 		const n = await req(db.transaction(STORE, "readonly").objectStore(STORE).count());
 		const keys = await req(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
 		return n - keys.filter(k => RESERVED_KEYS.has(k)).length;
-	} catch {
+	} catch (e) {
+		lastError = e;
 		return null;
 	}
 }
