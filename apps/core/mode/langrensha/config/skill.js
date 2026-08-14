@@ -23,11 +23,20 @@ export default {
 			// 每轮清空。只记 AI 狼的选择：真人是并行秘密选的，主机在他响应前拿不到，
 			// 而且把真人的秘密选择透给 AI 队友也不合适。
 			_status.swNightPlan = {};
+			_status.swNightPlanText = "";
 			const targets = game.players.slice(0).sortBySeat();
 			let answer_result = [[], []];
 			let humans = targets.filter(current => current === game.me || current.isOnline()); // 真人
 			let locals = targets.slice(0).randomSort(); // 本机托管的角色
 			locals.removeArray(humans);
+			// 【AI 狼排在真人之前决策】原来是"真人并行 → AI 顺序"，于是真人狼永远看不到 AI 队友
+			// 刀了谁 —— 而真狼人杀里狼队是能互相看的（本模式只给了队内聊天，AI 又不会发言）。
+			// 把 AI 狼提到最前面，它们决策完就往队内频道报一句、并汇总进 _status.swNightPlanText
+			// 塞给真人狼的选择提示，真人于是能避开重复刀、或者一起集火收人头。
+			// 决策顺序不影响结算：下面的结算是按 getAbility 遍历 answer_result 的，与顺序无关。
+			const localLang = locals.filter(current => current.getAbility() === "lang");
+			const localOther = locals.slice(0);
+			localOther.removeArray(localLang);
 			// 按身份给出对应的夜间选择。同一函数既在主机本地执行，也被 send 到客户端执行，
 			// 故内部不能引用闭包外的变量。
 			const send = current => {
@@ -52,7 +61,10 @@ export default {
 							}
 							return score;
 						});
-						next.set("prompt2", "选择一名角色，使其流失" + (current.swState.langdao || 1) + "点体力。（不触发技能）");
+						// 提示里带上 AI 队友已经选好的刀（_status.swNightPlanText，只推给狼），
+						// 免得真人狼盲选：要么撞在同一个满血目标上浪费，要么该集火时没集火。
+						// 气泡会消失，但队内聊天里也报了一份，翻记录能查。
+						next.set("prompt2", "选择一名角色，使其流失" + (current.swState.langdao || 1) + "点体力。（不触发技能）" + (_status.swNightPlanText ? '<br><span class="bluetext">队友已选：' + _status.swNightPlanText + "</span>" : ""));
 						next.set("_global_waiting", true);
 						break;
 					case "nvwu":
@@ -177,6 +189,44 @@ export default {
 				_status.roundSkilling = true;
 			});
 			await game.delayx();
+			// ── ① AI 狼先决策，结果播报给狼队 ──
+			if (localLang.length > 0) {
+				for (const current of localLang) {
+					const result = await send(current).forResult();
+					answer_result[0].push(current);
+					answer_result[1].push(result);
+					if (!result?.bool || !result.targets?.length) {
+						continue;
+					}
+					const knifed = result.targets[0];
+					const dmg = current?.swState?.langdao || 1;
+					if (knifed?.playerid) {
+						// 记账供后面的 AI 狼避免把刀叠在同一人身上浪费
+						_status.swNightPlan[knifed.playerid] = (_status.swNightPlan[knifed.playerid] || 0) + dmg;
+					}
+					// 往队内频道报一句。chatTeamOnline 只发给狼（且只有 game.me / 在线真人狼收得到，
+					// AI 之间互相不用看），并且会进 lib.SWchatHistory，气泡消失后还能翻聊天记录
+					current.chatTeamOnline(`我刀 ${get.translation(knifed)}（${dmg}点）`);
+					_status.swNightPlanText += `${_status.swNightPlanText ? "、" : ""}${get.translation(current)}→${get.translation(knifed)}(${dmg}点)`;
+				}
+				// 汇总只推给狼，不 broadcastAll —— 没必要让非狼的客户端也拿到狼队的计划
+				if (_status.swNightPlanText) {
+					const wolves = game.filterPlayer2();
+					for (let i = 0; i < wolves.length; i++) {
+						if (!wolves[i].isLang()) {
+							continue;
+						}
+						if (wolves[i] === game.me) {
+							continue; // 主机侧 _status 已经是同一份
+						}
+						if (wolves[i].isOnline2()) {
+							wolves[i].send(text => {
+								_status.swNightPlanText = text;
+							}, _status.swNightPlanText);
+						}
+					}
+				}
+			}
 			if (humans.length > 0) {
 				const solve = function (resolve, reject) {
 					return function (result, player) {
@@ -210,24 +260,20 @@ export default {
 					})
 				).catch(() => {});
 			}
-			if (locals.length > 0) {
-				for (const current of locals) {
+			// ── ③ 其余 AI（预言家/女巫/猎人/觉孤）最后决策 ──
+			if (localOther.length > 0) {
+				for (const current of localOther) {
 					const result = await send(current).forResult();
 					answer_result[0].push(current);
 					answer_result[1].push(result);
-					// 记下这一刀，让后面才决策的 AI 狼看得到（locals 是顺序跑的，所以能串起来）
-					if (current.getAbility() === "lang" && result?.bool && result.targets?.length) {
-						const knifed = result.targets[0];
-						if (knifed?.playerid) {
-							_status.swNightPlan[knifed.playerid] = (_status.swNightPlan[knifed.playerid] || 0) + (current?.swState?.langdao || 1);
-						}
-					}
 				}
 			}
 			delete event._global_waiting;
 			game.players.forEach(current => current.hideTimer());
 			game.broadcastAll(() => {
 				_status.roundSkilling = false;
+				// 队友刀谁的提示只在本轮夜里有意义，清掉免得下一轮/别处的提示里带出旧内容
+				_status.swNightPlanText = "";
 			});
 			// 结算觉醒孤独少女：认下偶像并暂时归入平民阵营
 			for (let i = 0; i < answer_result[0].length; i++) {
