@@ -249,12 +249,26 @@ async function sanitizeResponse(resp) {
 // 【所以别再把这条路当素材更新的保障】它只是顺手的机会主义优化。真正可靠的是
 // 「检查更新」里的**内容哈希清单比对**(pwa-asset-hashes.json ↔ 本地基线),
 // 见 TROUBLESHOOTING 第三节「★ 素材内容版本」。本标记保持内存态、保持现有行为即可。
+// 【install 进行中】给"访问即缓存"用。核心清单里有 104 个**非代码**文件
+// (12 张模式启动图、卡背/血条/边框主题图、suits/motoyamaru 字体、ol_bg.jpg…),
+// 它们归 install 管、住代码桶。但两条写入路径的**归类口径不一致**:
+//   install     看"在不在核心清单里" → 这 104 个进代码桶
+//   访问即缓存 看"是不是代码"(isCodeAsset) → 它们不是代码 → 进 IDB
+// 于是 install 还没装到某张启动图时它就被请求了 → IDB 存一份 → install 再往代码桶存一份
+// → **同一个文件两份**(实测一台设备上命中 63 个)。
+// 【为什么不用 isBootAsset 挡】它要从代码桶读 pwa-core-assets.json,而重复**恰好只
+// 发生在清单还没落地的那个窗口**,那时 getBootSet() 返回 null、isBootAsset 退化回
+// isCodeAsset → 照样写 IDB。装完之后代码桶已命中,压根走不到这条分支。
+// 所以必须用一个**不依赖缓存**的内存标志:install 期间干脆不往 IDB 写非代码文件。
+// 代价:那几十秒里被请求到的立绘也不入库,下次请求再存 —— 一次性窗口,可忽略。
+let installing = false;
 let assetRevalidateWindow = false;
 
 self.addEventListener("install", event => {
 	// 换版了(只有 SW 字节变了才会走 install)→ 给素材开一次后台校验窗口,
 	// 让上游改过的立绘/语音能更新到素材库。之后每次冷启动窗口都是关的,一个校验请求都不发。
 	assetRevalidateWindow = true;
+	installing = true;
 	// install 阶段预缓存"启动+标准对局必需"的核心文件(约 33MB,清单由构建生成)。
 	// 保证断网时也能稳定启动、进模式、玩标准局。失败不阻塞安装(降级为访问即缓存)。
 	// 注:保持简单快速——曾加"重试3轮+对账709项"导致 install 变慢/在 Safari 上迟迟装不上,
@@ -414,7 +428,12 @@ self.addEventListener("install", event => {
 				bootSetPromise = null;
 			}
 			await self.skipWaiting();
-		})()
+		})().finally(() => {
+			// 【必须放 finally】install 体内任何一处抛异常都会跳过这一行,
+			// 而那之后**整个 SW 生命周期**都不往素材库写东西 ——
+			// 访问即缓存全废,离线立绘变剥图。这个代价远大于它防的那点重复。
+			installing = false;
+		})
 	);
 });
 
@@ -812,7 +831,8 @@ self.addEventListener("fetch", event => {
 					// 离线也能看到那些立绘"的唯一来源(用户原话:以前刷新一下立绘就出来了)。
 					// 【为什么用 event.waitUntil】响应一返回,这个 fetch 事件就算处理完,浏览器
 					// 随时回收 SW,写入会中途蒸发 —— 病因六踩过同一个坑(那次是首页写不进去)。
-					if (assetDBReady && !isCode) {
+					// 【installing 时不写 IDB】防核心非代码素材被存成两份,理由见 installing 声明处。
+					if (assetDBReady && !isCode && !installing) {
 						event.waitUntil(
 							clean
 								.clone()
