@@ -1317,10 +1317,19 @@ export default {
 				} else if (number >= 5 && number <= 8) {
 					skill = "ccz_jinzhou";
 				} else if (number >= 9 && number <= 12) {
-					skill = "ccz_hunluan";
+					skill = "ccz_fengnang";
 				}
+				// 【K 从"无效果"改成本体的真·混乱】原来 K 是 7.7% 的空模——弃了一张黑桃、
+				// 用掉每回合那一次，什么都没得到。而 K 是最大的点数，配最强的效果才自然。
+				// 本体的混乱(goMad)并不是个有规则文本的技能，mad 只是个标记，
+				// 机制全在两处：
+				//   get/index.js:6554  attitude()  → if (from.isMad()) att = -att;  敌友颠倒
+				//   player.js:13316  isUnderControl() → 混乱者失去操作权，交 AI 托管
+				// 即「敌友颠倒 + 失控一回合」。本体只有 boss 模式和杀海拾遗在用。
+				// 命中率从 92.3% 变 100%，而且多了个 7.7% 的大奖。
 				if (!skill) {
-					player.popup("失效", "fire");
+					target.goMad({ player: "phaseAfter" });
+					player.popup("混乱", "thunder");
 					return;
 				}
 				target.addTempSkill(skill, { player: "phaseAfter" });
@@ -1332,9 +1341,9 @@ export default {
 		},
 
 		/** 混乱：不能使用锦囊牌。与 ccz_mabi(禁杀)、ccz_jinzhou(禁技能) 同族 */
-		ccz_hunluan: {
+		ccz_fengnang: {
 			mark: true,
-			marktext: "乱",
+			marktext: "囊",
 			intro: { content: "不能使用锦囊牌" },
 			mod: {
 				cardEnabled(card) {
@@ -1505,11 +1514,11 @@ export default {
 
 		ccz_xuanwubaoyu: "玄武宝玉",
 		ccz_xuanwubaoyu_bg: "武",
-		ccz_xuanwubaoyu_info: "每回合限一次，当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：判定结果为A~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~Q，不能使用锦囊牌；K则无效果。",
+		ccz_xuanwubaoyu_info: "每回合限一次，当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：判定结果为A~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~Q，不能使用锦囊牌；K，进入混乱状态。",
 		ccz_xuanwubaoyu_skill: "玄武宝玉",
-		ccz_xuanwubaoyu_skill_info: "每回合限一次，当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：判定结果为A~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~Q，不能使用锦囊牌；K则无效果。",
-		ccz_hunluan: "混乱",
-		ccz_hunluan_info: "你不能使用锦囊牌。",
+		ccz_xuanwubaoyu_skill_info: "每回合限一次，当你对其他角色造成伤害后，你可以弃置一张黑桃手牌并进行判定，令该角色直到其下个回合结束前：判定结果为A~4，不能使用【杀】；5~8，不能发动技能（装备技能除外）；9~Q，不能使用锦囊牌；K，进入混乱状态。",
+		ccz_fengnang: "封囊",
+		ccz_fengnang_info: "你不能使用锦囊牌。",
 	},
 
 	/**
