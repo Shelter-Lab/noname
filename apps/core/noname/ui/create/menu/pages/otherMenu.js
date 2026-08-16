@@ -478,7 +478,21 @@ export const otherMenu = function (/** @type { boolean | undefined } */ connectM
 								var r2 = await lib.init.downloadOfflineAssets(btn, { onlyList: assetInfo.changed, silent: true });
 								// 【不需要在这里记版本号】下载器走 db.putAssets,字节和版本号同事务写入。
 								// 以前这里要手动 updateBaseline,而漏记正是“卡面永远查不出更新”的成因。
-								alert("已更新 " + (r2 ? r2.done : 0) + "/" + n2 + " 个素材。" + (r2 && r2.failed.length ? "\n有 " + r2.failed.length + " 个没写进本地库,再点一次可补。" : "\n重新打开应用后生效。"));
+								// 【不能笼统说"重新打开才生效"】大多数情况不需要。下载器用的是
+								// fetch(url, { cache: "no-cache" })，而它请求的 URL 和卡面显示用的**是同一个**
+								// —— 那次 200 順手把浏览器 HTTP 缓存里的旧副本也顶掉了，于是之后**新建**的
+								// 卡牌元素直接就是新图。真正需要重开的只有**本次已经渲染过**的卡面：
+								// 浏览器在文档内存里存着解码后的位图（按 URL 索引），那一份不会因
+								// HTTP 缓存更新而失效。
+								alert(
+									"已更新 " +
+										(r2 ? r2.done : 0) +
+										"/" +
+										n2 +
+										" 个素材。" +
+										(r2 && r2.failed.length ? "\n有 " + r2.failed.length + " 个没写进本地库，再点一次可补。" : "") +
+										"\n大部分立刻生效；本次已经显示过的卡面要重新打开应用才会换。"
+								);
 								return;
 							}
 						}

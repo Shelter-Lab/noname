@@ -178,7 +178,10 @@ export default {
 			type: "equip",
 			subtype: "equip1",
 			distance: { attackFrom: -3 },
-			ai: { basic: { equipValue: 4 } },
+			// 【equipValue 4.5】效果是「每回合一次，你造成的火属性伤害 +1」。
+			// 上有方天画戟/金火罐炮/养由基之弓的 5，下有七星剑和两把弓的 4；
+			// 本体最高就是贯石斧 4.5，刚好落在这一档。
+			ai: { basic: { equipValue: 4.5 } },
 			skills: ["ccz_wuhuoshenyanshan_skill"],
 		},
 
@@ -828,6 +831,13 @@ export default {
 			equipSkill: true,
 			trigger: { source: "damageBegin1" },
 			forced: true,
+			// 【每回合限一次】不限的话有两个失控组合：
+			//   · 本包朱雀宝玉是**宝物位**（equip5）、本卡是**武器位**（equip1），两个能同穿；
+			//     朱雀是对目标及其上下家各 1 点火伤，三下都 +1 → 弃 1 张♦ 打出 6 点。
+			//   · 铁索连环连三人 + 火杀，每人都 +1 → 同样 6 点。
+			// usable 数的是**技能发动次数**（getStat("skill")[name]），和出杀次数是两个
+			// 独立的桶，不会影响你出几张杀。单张火杀/火攻不受影响。
+			usable: 1,
 			filter(event, player) {
 				return game.hasNature(event, "fire");
 			},
@@ -1493,7 +1503,7 @@ export default {
 
 		ccz_wuhuoshenyanshan: "五火神焰扇",
 		ccz_wuhuoshenyanshan_bg: "焰",
-		ccz_wuhuoshenyanshan_info: "锁定技，当你造成火属性伤害时，此伤害+1。",
+		ccz_wuhuoshenyanshan_info: "锁定技，每回合限一次，当你造成火属性伤害时，此伤害+1。",
 		ccz_wuhuoshenyanshan_skill: "五火神焰扇",
 		ccz_wuhuoshenyanshan_skill_info: "锁定技，当你造成火属性伤害时，此伤害+1。",
 
