@@ -652,7 +652,12 @@ export default {
 				// 绕一圈还能回头再打他 —— A→B→A 就是这么漏出来的。
 				player.addTempSkill("ccz_fangtianhuaji_used");
 				player.markAuto("ccz_fangtianhuaji_used", [trigger.player, target]);
-				await player.useCard({ name, isCard: false }, target, false);
+				// 【isCard 必须为 true】本体所有「视为使用杀/决斗」都是 isCard: true
+				// (huicui:2596/18980、refresh:3106、tw:16714、collab:8794 … 六处无例外)。
+				// 写 false 时【杀】能用、【决斗】走不起来 —— 决斗的 content 要抽牌拼杀、
+				// 走完整的"真牌"使用流程，而 isCard: false 把它当成非牌处理了。
+				// 【第三个参数 false】useCard 里布尔值落到 addCount —— 不计入出牌次数，正是我们要的。
+				await player.useCard({ name, isCard: true }, target, false);
 			},
 		},
 		/**
@@ -1168,7 +1173,9 @@ export default {
 			},
 			async content(event, trigger, player) {
 				const target = event.target;
-				for (let i = 0; i < 3; i++) {
+				// 【四次而不是三次】实测三次太弱：期望 1.5 点伤，而成本是一张梅花手牌 +
+				// 出牌阶段限一次，不如直接出一张【杀】。四次 = 期望 2 点雷伤。
+				for (let i = 0; i < 4; i++) {
 					// 目标死了/自己死了就停,别对着空位继续判
 					if (!target.isIn() || !player.isIn()) {
 						break;
@@ -1185,10 +1192,10 @@ export default {
 			ai: {
 				order: 8,
 				result: {
-					// 期望 1.5 点雷电伤害。damageEffect 会自动算目标血量/属性/防具/会不会被杀死,
-					// 乘以 1.5 就是期望收益 —— 不用自己算"值不值得"。
+					// 期望 2 点雷电伤害(4 次判定 × 黑色 50%)。damageEffect 会自动算目标血量/属性/防具/会不会被杀死,
+					// 乘以 2 就是期望收益 —— 不用自己算"值不值得"。
 					target(player, target) {
-						return 1.5 * get.damageEffect(target, player, target, "thunder");
+						return 2 * get.damageEffect(target, player, target, "thunder");
 					},
 				},
 			},
@@ -1480,9 +1487,9 @@ export default {
 		// 四象宝玉
 		ccz_qinglongbaoyu: "青龙宝玉",
 		ccz_qinglongbaoyu_bg: "龙",
-		ccz_qinglongbaoyu_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
+		ccz_qinglongbaoyu_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行四次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
 		ccz_qinglongbaoyu_skill: "青龙宝玉",
-		ccz_qinglongbaoyu_skill_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
+		ccz_qinglongbaoyu_skill_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行四次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
 
 		ccz_zhuquebaoyu: "朱雀宝玉",
 		ccz_zhuquebaoyu_bg: "雀",
