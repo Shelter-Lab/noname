@@ -76,18 +76,23 @@ function armorValid(event, player) {
  * game.hasNature(event)，而 target.damage("fire") 会给事件带上 nature，
  * 所以黄金铠/太平要术本来就真能挡住火攻和雷击，错的只是 AI 提示。
  */
-function hasNatureLike(card) {
+function hasNatureLike(card, nature) {
 	if (!card) {
 		return false;
 	}
-	if (game.hasNature(card)) {
+	if (game.hasNature(card, nature)) {
 		return true;
 	}
 	const name = get.name(card) || card.name;
-	if (["firedamage", "thunderdamage", "icedamage"].includes(name)) {
-		return true;
+	const pseudo = { firedamage: "fire", thunderdamage: "thunder", icedamage: "ice" };
+	if (pseudo[name]) {
+		return !nature || pseudo[name] === nature;
 	}
-	return Boolean(get.info(card)?.cardnature);
+	const cn = get.info(card)?.cardnature;
+	if (!cn) {
+		return false;
+	}
+	return !nature || get.natureList(cn).includes(nature);
 }
 
 /** @type { importCardConfig } */
@@ -829,6 +834,22 @@ export default {
 			async content(event, trigger, player) {
 				trigger.num++;
 			},
+		
+			ai: {
+				effect: {
+					// 同古镠刀的写法（见玉玺处说明）。判据用 hasNatureLike(card, "fire")：
+					// game.hasNature 漏火攻（它用 cardnature）和技能伤害的伪牌 firedamage。
+					player(card, player, target, current, isLink) {
+						if (!hasNatureLike(card, "fire")) {
+							return;
+						}
+						if (target?.hasSkillTag("filterDamage", null, { player: player, card: card })) {
+							return;
+						}
+						return [1, 0, 1, -3];
+					},
+				},
+			},
 		},
 
 		// —— 七星剑：你的锦囊不可被【无懈可击】——
@@ -1081,6 +1102,28 @@ export default {
 			},
 			async content(event, trigger, player) {
 				trigger.num++;
+			},
+		
+			ai: {
+				effect: {
+					// 【照本体古镠刀的写法】extra.js:1125 同样是“伤害 +1”，它给的就是
+					// ai.effect.player 返回 [1, 0, 1, -3]：前两个不动自己那侧的估值，
+					// 后两个把“对目标的收益”再推 3 分（result2 对伤害牌是负值，所以 -3）。
+					// 不写的后果不是白扔牌，而是**低估** —— AI 不知道自己这一刀是 2 伤，
+					// 于是不优先出【杀】、也不拿它去收残血。
+					// 【不担心把黄金铠算反】get.effect 里 zerotarget 是**最后**才应用的
+					// （if (zerotarget) result2 = 0，在所有乘数/加数之后），防具的归零会盖住这个加数。
+					player(card, player, target, current, isLink) {
+						if (isLink || !card || !["sha", "juedou"].includes(get.name(card))) {
+							return;
+						}
+						// 目标能减伤的话这 +1 不一定到位，别让 AI 乐观（古镠刀也这么防）
+						if (target?.hasSkillTag("filterDamage", null, { player: player, card: card })) {
+							return;
+						}
+						return [1, 0, 1, -3];
+					},
+				},
 			},
 		},
 		/**
