@@ -95,6 +95,95 @@ function hasNatureLike(card, nature) {
 	return !nature || get.natureList(cn).includes(nature);
 }
 
+/**
+ * 各防具「这次伤害会被我挡掉吗」的共享判据。
+ *
+ * 【为什么要共享】同一个条件要被三处问到：
+ *   ① filter(event, player)               —— 实际规则（要不要 trigger.cancel()）
+ *   ② ai.effect.target(card, …)           —— 攻方“这张牌值不值得打”
+ *   ③ ai.skillTagFilter(player, tag, arg) —— 攻方“要不要加伤害”（filterDamage 标签）
+ * 写三份必然漂移 —— 本轮已经因“两处判据不一致”栽过两次（假「41 个未下载」、
+ * 核心素材存两份），所以条件只写在这里一份。
+ *
+ * 【为什么传 ctx 而不是直接传 card】属性的来源两边不同：规则侧要看**伤害事件**的
+ * 属性（game.hasNature(event)）—— 铁索连环的连环伤害属性在事件上、不一定在牌上；
+ * 而 AI 侧只有牌，只能用 hasNatureLike(card)。所以谁调它谁把 hasNature 算好传进来。
+ *
+ * @param {string} name 防具的牌名
+ * @param {{card:any, hasNature:boolean, source:any, target:any}} ctx
+ */
+function armorBlocks(name, ctx) {
+	const { card, hasNature, source, target } = ctx;
+	switch (name) {
+		case "ccz_huangjinkai":
+		case "ccz_taipingyaoshu":
+			// 带任何属性的伤害
+			return hasNature;
+		case "ccz_baiyinkai":
+			// 无来源卡的伤害 = 技能/效果直接造成的
+			return !card;
+		case "ccz_longlinkai":
+			return Boolean(card) && get.type2(card) === "trick";
+		case "ccz_jingkai":
+			// 【判据是实际距离而不是对方装了什么武器】枚举武器会漏掉靠 +1 马拉近、
+			// 或靠技能改距离打过来的；get.distance 是本体算距离的唯一入口，全算进去了。
+			// 【门槛为何是 3】8 人局其他 7 人的座位距离是 1 2 3 4 3 2 1：
+			//   >=2 免疫 5 人(71%)——比本体任何防具都强且装上即成立；
+			//   >=3 免疫 3 人(43%)——与仁王盾/八卦阵同档，且攻方有明确突破手段。
+			return card?.name === "sha" && Boolean(source) && get.distance(source, target) >= 3;
+		case "ccz_lianhuankai":
+			// 本回合已经受过一次【杀】伤害了 → 后续的无效
+			return card?.name === "sha" && target.hasSkill("ccz_lianhuankai_used", null, false);
+		default:
+			return false;
+	}
+}
+
+/**
+ * 防具类的 ai 块工厂。三件事一次写完：
+ *   · effect.target   —— 挡得住就返回 zeroplayertarget（或自定义值），让 AI 不白扔牌
+ *   · filterDamage    —— 本体规范标签，76 处在查它（古锭刀及大量“伤害+1”武将技）；
+ *     声明了它们就不会白加伤害。照本体白银狮子（extra.js:1361）的写法。
+ *   · skillTagFilter  —— 让上面那个标签**带条件**。这一条必不可少：
+ *     无条件 filterDamage: true 会让那 76 处一律认为“这人减伤”，连普通【杀】也被
+ *     劝退 —— 而黄金铠只挡属性伤害，普通杀照样打得动。hasSkillTag 的源码甚至会
+ *     警告漏写它（“疑似忘给…加 skillTagFilter 了”）。
+ *     那 76 处里 65 处传了 arg.card，10 处只传 { player } —— 后者拿不到牌，我们返回
+ *     false（“不减伤”）。那是保守方向：宁可让对方高估、白扔一张（那种情况
+ *     effect.target 已经在管），也不让 AI 无缘躲开一个其实打得动的目标。
+ *
+ * @param {string} name 防具牌名
+ * @param {(target:any, player:any) => any} [onBlock] 挡住时的返回值，默认 zeroplayertarget
+ */
+function armorAI(name, onBlock) {
+	// 青釭剑那道闸：防具被无视时以上全不成立。三处都要先过它。
+	const unequipped = (player, target, card) => target.hasSkillTag("unequip2") || player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) || player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card });
+	return {
+		filterDamage: true,
+		skillTagFilter(player, tag, arg) {
+			if (tag !== "filterDamage") {
+				return;
+			}
+			const source = arg?.player;
+			if (!source || unequipped(source, player, arg?.card)) {
+				return false;
+			}
+			return armorBlocks(name, { card: arg?.card, hasNature: hasNatureLike(arg?.card), source: source, target: player });
+		},
+		effect: {
+			target(card, player, target, current) {
+				if (unequipped(player, target, card)) {
+					return;
+				}
+				if (!armorBlocks(name, { card: card, hasNature: hasNatureLike(card), source: player, target: target })) {
+					return;
+				}
+				return onBlock ? onBlock(target, player) : "zeroplayertarget";
+			},
+		},
+	};
+}
+
 /** @type { importCardConfig } */
 export default {
 	name: "caocaozhuan",
@@ -231,7 +320,6 @@ export default {
 			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_chixiaojian_skill"],
 		},
-
 
 		// ================= 防具 =================
 
@@ -518,7 +606,6 @@ export default {
 			ai: { basic: { equipValue: 7 } },
 			skills: ["ccz_xuanwubaoyu_skill"],
 		},
-
 	},
 
 	skill: {
@@ -843,7 +930,7 @@ export default {
 			async content(event, trigger, player) {
 				trigger.num++;
 			},
-		
+
 			ai: {
 				effect: {
 					// 同古镠刀的写法（见玉玺处说明）。判据用 hasNatureLike(card, "fire")：
@@ -893,45 +980,23 @@ export default {
 			trigger: { player: "damageBegin4" },
 			forced: true,
 			filter(event, player) {
-				if (!event.card || event.card.name !== "sha" || !event.source) {
-					return false;
-				}
+				// 条件只写在 armorBlocks 里一份，见其说明。hasNature 必须由**伤害事件**算 ——
+				// 铁索连环的连环伤害属性在事件上、不一定在牌上。
 				if (!armorValid(event, player)) {
 					return false;
 				}
-				// 【判据是实际距离而不是对方装了什么武器】
-				// 原先遍历来源装备区找 attackFrom >= 3 的武器,那有个漏洞:靠 +1 马拉近、
-				// 或靠技能改距离打过来的,都躲过了检查。而 get.distance 是本体计算距离的
-				// 唯一入口,把马、技能、装备的影响全算进去了 —— 一行胜过一堆枚举。
-				// 【门槛为什么是 3】8 人局里其他 7 人的座位距离是 1 2 3 4 3 2 1:
-				//   >=2 免疫 5 人(71%) —— 全场只有上下家能打你,比本体任何防具都强,且装上即成立;
-				//   >=3 免疫 3 人(43%) —— 与仁王盾(挡黑杀约50%)、八卦阵(约40%)同档,
-				// 且攻方有明确突破手段(配 +1 马或范围>=3 的长兵器),不是没辙。
-				return get.distance(event.source, player) >= 3;
+				return armorBlocks("ccz_jingkai", {
+					card: event.card,
+					hasNature: game.hasNature(event),
+					source: event.source,
+					target: player,
+				});
 			},
 			async content(event, trigger, player) {
 				trigger.cancel();
 			},
-		
-			ai: {
-				effect: {
-					// 判据与 filter 一致：来源与我的距离 ≥3 时【杀】无效 → 远处出杀零收益
-					target(card, player, target, current) {
-						if (target.hasSkillTag("unequip2")) {
-							return;
-						}
-						if (
-							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
-							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
-						) {
-							return;
-						}
-						if (card.name === "sha" && get.distance(player, target) >= 3) {
-							return "zeroplayertarget";
-						}
-					},
-				},
-			},},
+			ai: armorAI("ccz_jingkai"),
+		},
 
 		// —— 连环铠：每回合只受一次【杀】造成的伤害 ——
 		ccz_lianhuankai_skill: {
@@ -939,40 +1004,24 @@ export default {
 			trigger: { player: "damageBegin4" },
 			forced: true,
 			filter(event, player) {
-				if (!event.card || event.card.name !== "sha") {
-					return false;
-				}
+				// 条件只写在 armorBlocks 里一份，见其说明。hasNature 必须由**伤害事件**算 ——
+				// 铁索连环的连环伤害属性在事件上、不一定在牌上。
 				if (!armorValid(event, player)) {
 					return false;
 				}
-				// 本回合已经受过一次【杀】伤害了 → 后续的无效
-				return player.hasSkill("ccz_lianhuankai_used", null, false);
+				return armorBlocks("ccz_lianhuankai", {
+					card: event.card,
+					hasNature: game.hasNature(event),
+					source: event.source,
+					target: player,
+				});
 			},
 			async content(event, trigger, player) {
 				trigger.cancel();
 			},
 			group: "ccz_lianhuankai_mark",
-		
-			ai: {
-				effect: {
-					// 本回合已受过一次【杀】伤害 → 之后的【杀】对我零收益。
-					// 判据用 hasSkill 查那个标记技能，与 filter 完全一致。
-					target(card, player, target, current) {
-						if (target.hasSkillTag("unequip2")) {
-							return;
-						}
-						if (
-							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
-							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
-						) {
-							return;
-						}
-						if (card.name === "sha" && target.hasSkill("ccz_lianhuankai_used", null, false)) {
-							return "zeroplayertarget";
-						}
-					},
-				},
-			},},
+			ai: armorAI("ccz_lianhuankai"),
+		},
 		/** 记账用：本回合受过【杀】伤害就打个标记。靠 addTempSkill 的默认到期
 		 * （{ global: ["phaseAfter","phaseBeforeStart"] }，任意回合结束即清）——
 		 * 不是靠 clearTime，那个字段在本体库里只有两处 UI 判断，不清存储。 */
@@ -1004,32 +1053,23 @@ export default {
 			trigger: { player: "damageBegin4" },
 			forced: true,
 			filter(event, player) {
-				// hasNature(event) 不带第二参 = "有任何属性"
-				return game.hasNature(event) && armorValid(event, player);
+				// 条件只写在 armorBlocks 里一份，见其说明。hasNature 必须由**伤害事件**算 ——
+				// 铁索连环的连环伤害属性在事件上、不一定在牌上。
+				if (!armorValid(event, player)) {
+					return false;
+				}
+				return armorBlocks("ccz_huangjinkai", {
+					card: event.card,
+					hasNature: game.hasNature(event),
+					source: event.source,
+					target: player,
+				});
 			},
 			async content(event, trigger, player) {
 				trigger.cancel();
 			},
-		
-			ai: {
-				effect: {
-					// 属性伤害对我无效 → 带属性的牌打我零收益（火杀/雷杀/火攻/铁索连环的火雷…）
-					target(card, player, target, current) {
-						if (target.hasSkillTag("unequip2")) {
-							return;
-						}
-						if (
-							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
-							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
-						) {
-							return;
-						}
-						if (hasNatureLike(card)) {
-							return "zeroplayertarget";
-						}
-					},
-				},
-			},},
+			ai: armorAI("ccz_huangjinkai"),
+		},
 
 		// —— 白银铠：防止一切"无来源卡"的伤害（技能/效果造成的）——
 		ccz_baiyinkai_skill: {
@@ -1037,34 +1077,22 @@ export default {
 			trigger: { player: "damageBegin4" },
 			forced: true,
 			filter(event, player) {
-				return !event.card && armorValid(event, player);
+				// 条件只写在 armorBlocks 里一份，见其说明。hasNature 必须由**伤害事件**算 ——
+				// 铁索连环的连环伤害属性在事件上、不一定在牌上。
+				if (!armorValid(event, player)) {
+					return false;
+				}
+				return armorBlocks("ccz_baiyinkai", {
+					card: event.card,
+					hasNature: game.hasNature(event),
+					source: event.source,
+					target: player,
+				});
 			},
 			async content(event, trigger, player) {
 				trigger.cancel();
 			},
-
-			ai: {
-				effect: {
-					// 【本卡挡的就是“没有牌的伤害”= 技能伤害】而 AI 评估技能伤害时走的是
-					// get.damageEffect，它会造一张叫 damage / firedamage / thunderdamage / icedamage
-					// 的**伪牌**丢进 get.effect。所以这几个名字就是“技能伤害”在 AI 层的长相。
-					// 原来没有 ai 块 —— 于是张角雷击、张宝高順之类的技能照样往白银铠身上砸。
-					target(card, player, target, current) {
-						if (target.hasSkillTag("unequip2")) {
-							return;
-						}
-						if (
-							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
-							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
-						) {
-							return;
-						}
-						if (["damage", "firedamage", "thunderdamage", "icedamage"].includes(card ? get.name(card) || card.name : null)) {
-							return "zeroplayertarget";
-						}
-					},
-				},
-			},
+			ai: armorAI("ccz_baiyinkai"),
 		},
 
 		// —— 龙鳞铠：防止锦囊造成的伤害 ——
@@ -1073,31 +1101,23 @@ export default {
 			trigger: { player: "damageBegin4" },
 			forced: true,
 			filter(event, player) {
-				return event.card && get.type2(event.card) === "trick" && armorValid(event, player);
+				// 条件只写在 armorBlocks 里一份，见其说明。hasNature 必须由**伤害事件**算 ——
+				// 铁索连环的连环伤害属性在事件上、不一定在牌上。
+				if (!armorValid(event, player)) {
+					return false;
+				}
+				return armorBlocks("ccz_longlinkai", {
+					card: event.card,
+					hasNature: game.hasNature(event),
+					source: event.source,
+					target: player,
+				});
 			},
 			async content(event, trigger, player) {
 				trigger.cancel();
 			},
-		
-			ai: {
-				effect: {
-					// 锦囊造成的伤害对我无效 → 伤害类锦囊打我零收益（火攻、决斗、南蛮、万箭…）
-					target(card, player, target, current) {
-						if (target.hasSkillTag("unequip2")) {
-							return;
-						}
-						if (
-							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
-							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
-						) {
-							return;
-						}
-						if (get.type2(card) === "trick" && get.tag(card, "damage")) {
-							return "zeroplayertarget";
-						}
-					},
-				},
-			},},
+			ai: armorAI("ccz_longlinkai"),
+		},
 
 		// —— 凤凰羽衣：回合开始回 1 体力 ——
 		ccz_fenghuangyuyi_skill: {
@@ -1123,7 +1143,7 @@ export default {
 			async content(event, trigger, player) {
 				trigger.num++;
 			},
-		
+
 			ai: {
 				effect: {
 					// 【照本体古镠刀的写法】extra.js:1125 同样是“伤害 +1”，它给的就是
@@ -1205,37 +1225,24 @@ export default {
 			trigger: { player: "damageBegin4" },
 			forced: true,
 			filter(event, player) {
-				return game.hasNature(event) && armorValid(event, player);
+				// 条件只写在 armorBlocks 里一份，见其说明。hasNature 必须由**伤害事件**算 ——
+				// 铁索连环的连环伤害属性在事件上、不一定在牌上。
+				if (!armorValid(event, player)) {
+					return false;
+				}
+				return armorBlocks("ccz_taipingyaoshu", {
+					card: event.card,
+					hasNature: game.hasNature(event),
+					source: event.source,
+					target: player,
+				});
 			},
 			async content(event, trigger, player) {
 				trigger.cancel();
 				await player.recover();
 			},
-		
-			ai: {
-				effect: {
-					// 【必须用数组形式 [乘数, 加数]，单个数字表达不了】get.effect 里
-					// 数字分支走的是 result2 *= temp2 —— 那是**乘数**（get/index.js:7011）。
-					// 而 result2 对伤害牌本身是负值，所以返回 0.5 只是"伤害减半"，方向根本不对。
-					// 本卡的真实效果是「伤害归零 + 目标回 1 血」，那正是 [0, 回血收益]：
-					// 乘数 0 抹掉伤害，加数补上回血（result2 += temp02，见 get/index.js:7035）。
-					// 不写的话 AI 会往穿太平要术的人身上砸火杀 —— 那不是白扔，是**主动给敌人治疗**。
-					target(card, player, target, current) {
-						if (target.hasSkillTag("unequip2")) {
-							return;
-						}
-						if (
-							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
-							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
-						) {
-							return;
-						}
-						if (hasNatureLike(card)) {
-							return [0, get.recoverEffect(target, player, target)];
-						}
-					},
-				},
-			},},
+			ai: armorAI("ccz_taipingyaoshu", (target, player) => [0, get.recoverEffect(target, player, target)]),
+		},
 
 		// —— 太平清领道：判定阶段开始时，可弃置判定区一张牌 ——
 		ccz_taipingqinglingdao_skill: {
@@ -1257,7 +1264,6 @@ export default {
 				await player.discard(event.cards ?? event.result?.links ?? []);
 			},
 		},
-
 
 		// —— 赤霄剑：【杀】被闪抵消后，可弃一张牌令其仍造成伤害 ——
 		ccz_chixiaojian_skill: {
