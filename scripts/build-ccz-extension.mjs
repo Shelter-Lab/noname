@@ -40,23 +40,33 @@ const IMG_DIR = "apps/core/image/card";
 const raw = await fs.readFile(SRC, "utf8");
 const src = raw.split("\r\n").join("\n");
 
-// ── ① 抽出 armorValid（技能都依赖它；它在模块作用域，包装后要放进闭包）──
-const armorStart = src.indexOf("function armorValid(");
-if (armorStart < 0) throw new Error("找不到 armorValid");
-let depth = 0;
-let armorEnd = -1;
-for (let i = src.indexOf("{", armorStart); i < src.length; i++) {
-	if (src[i] === "{") depth++;
-	else if (src[i] === "}") {
-		depth--;
-		if (!depth) {
-			armorEnd = i + 1;
-			break;
+// ── ① 抽出所有模块作用域的辅助函数（技能都依赖它们，包装后要放进闭包）──
+// 【为什么不写死函数名】上一版只抽 armorValid，后来卡牌包里又加了
+// hasNatureLike，打出来的扩展就是 ReferenceError——而这个错只在玩家装了扩展、
+// 且真的碰到黄金铠/太平要术时才炸，构建和语法检查都查不出来。
+// 改成扫描 export default 之前的全部顶层 function 声明，以后加函数不用再改这里。
+const defAtForFns = src.indexOf("export default");
+const helperSrcs = [];
+for (const m of src.slice(0, defAtForFns).matchAll(/^function\s+(\w+)\s*\(/gm)) {
+	const start = m.index;
+	let depth = 0,
+		end = -1;
+	for (let i = src.indexOf("{", start); i < src.length; i++) {
+		if (src[i] === "{") depth++;
+		else if (src[i] === "}") {
+			depth--;
+			if (!depth) {
+				end = i + 1;
+				break;
+			}
 		}
 	}
+	if (end < 0) throw new Error(`函数 ${m[1]} 的括号没配平`);
+	helperSrcs.push(src.slice(start, end));
 }
-const armorValidSrc = src.slice(armorStart, armorEnd);
-
+if (!helperSrcs.length) throw new Error("一个顶层辅助函数都没找到，卡牌包结构可能变了");
+const armorValidSrc = helperSrcs.join("\n\n");
+let depth = 0;
 // ── ② 抽出 export default 的对象字面量 ──
 const defAt = src.indexOf("export default {");
 if (defAt < 0) throw new Error("找不到 export default");

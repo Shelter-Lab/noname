@@ -56,6 +56,40 @@ function armorValid(event, player) {
 	return true;
 }
 
+/**
+ * 这张牌（或这次伪造的伤害牌）是不是「带属性」？
+ *
+ * 【为什么不能直接用 game.hasNature(card)】它只认 card.nature 一种形态（get.nature()
+ * 只读这个字段），而属性伤害在 AI 层总共有三种长相，漏一种 AI 就会白扔牌：
+ *   ① card.nature —— 火杀/雷杀、铁索连环的连环伤害。hasNature 只能认出这一种。
+ *   ② 牌定义里的 cardnature —— 火攻(extra.js:260)、国战两张、sp、standard、
+ *      仙侠各一张，本体共 6 处。它们的 card.nature 是 undefined，
+ *      所以 ① 的判据对它们恒为 false —— 实测到的「AI 对黄金铠用火攻」就是这个。
+ *   ③ 伪牌名 firedamage / thunderdamage / icedamage —— get.damageEffect 给**技能伤害**
+ *      造的假牌（张角雷击、我们自己的朱雀/青龙宝玉…）。看 get/index.js：
+ *          var name = "damage";
+ *          if (nature == "fire") name = "firedamage"; …
+ *          get.effect(target, { name: name }, …)   // 连 nature 字段都没有
+ *      所以技能伤害也漏。
+ *
+ * 注：**实际技能的 filter 不用改** —— 它们判的是伤害事件
+ * game.hasNature(event)，而 target.damage("fire") 会给事件带上 nature，
+ * 所以黄金铠/太平要术本来就真能挡住火攻和雷击，错的只是 AI 提示。
+ */
+function hasNatureLike(card) {
+	if (!card) {
+		return false;
+	}
+	if (game.hasNature(card)) {
+		return true;
+	}
+	const name = get.name(card) || card.name;
+	if (["firedamage", "thunderdamage", "icedamage"].includes(name)) {
+		return true;
+	}
+	return Boolean(get.info(card)?.cardnature);
+}
+
 /** @type { importCardConfig } */
 export default {
 	name: "caocaozhuan",
@@ -75,7 +109,9 @@ export default {
 			fullskin: true,
 			type: "equip",
 			subtype: "equip1",
-			distance: { attackFrom: -2 },
+			// 【距离 -3 = 攻击范围 4，与本体方天画戟一致】standard.js 的 fangtian 就是
+			// attackFrom: -3。同名同形制的牌范围不一样会让人误判，对齐它。
+			distance: { attackFrom: -3 },
 			ai: { basic: { equipValue: 5 } },
 			skills: ["ccz_fangtianhuaji_skill"],
 		},
@@ -85,7 +121,7 @@ export default {
 		 * 【为什么范围只给 3】本体的规律是效果越强、攻击范围越小：雌雄/青釭范围 2（ev2）、
 		 * 青龙/蛇矛/贯石斧范围 3（ev3~4）、麒麟弓范围 5 但效果最弱（ev3）。
 		 * "下回合不能使用【杀】"等于让对手空一轮输出，比麒麟弓强得多，
-		 * 再给范围 5 就是双强 —— 故取范围 3（attackFrom -2），ev 给 5。
+		 * 再给范围 5 就是双强。（方天画戟是例外：它跟本体同名牌对齐取范围 4。）
 		 */
 		ccz_lvbuzhigong: {
 			fullskin: true,
@@ -597,7 +633,7 @@ export default {
 				// （轮到选第三个时被排除的是 B），三刀就能集火两点砸在一人头上 ——
 				// 那是集火处刑，不是"战三英"。故用标记记下本回合已被此法牵连过的人。
 				// 【canUse 第三参 false = 无距离限制】连击那一下**不受攻击范围约束**，
-				// 能打全场任何人 —— 范围 3 只管你自己主动出的那张【杀】。
+				// 能打全场任何人 —— 范围 4 只管你自己主动出的那张【杀】。
 				// 有意如此:吕布在阵中转身就砍，不该被"隔了两个人"挡住。
 				const done = player.getStorage("ccz_fangtianhuaji_used");
 				return player.countCards("h") > 0 && game.hasPlayer(t => t !== player && t !== event.player && !done.includes(t) && (player.canUse("sha", t, false) || player.canUse("juedou", t, false)));
@@ -947,7 +983,7 @@ export default {
 						) {
 							return;
 						}
-						if (game.hasNature(card)) {
+						if (hasNatureLike(card)) {
 							return "zeroplayertarget";
 						}
 					},
@@ -964,6 +1000,29 @@ export default {
 			},
 			async content(event, trigger, player) {
 				trigger.cancel();
+			},
+
+			ai: {
+				effect: {
+					// 【本卡挡的就是“没有牌的伤害”= 技能伤害】而 AI 评估技能伤害时走的是
+					// get.damageEffect，它会造一张叫 damage / firedamage / thunderdamage / icedamage
+					// 的**伪牌**丢进 get.effect。所以这几个名字就是“技能伤害”在 AI 层的长相。
+					// 原来没有 ai 块 —— 于是张角雷击、张宝高順之类的技能照样往白银铠身上砸。
+					target(card, player, target, current) {
+						if (target.hasSkillTag("unequip2")) {
+							return;
+						}
+						if (
+							player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) ||
+							player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })
+						) {
+							return;
+						}
+						if (["damage", "firedamage", "thunderdamage", "icedamage"].includes(card ? get.name(card) || card.name : null)) {
+							return "zeroplayertarget";
+						}
+					},
+				},
 			},
 		},
 
@@ -1097,7 +1156,7 @@ export default {
 						) {
 							return;
 						}
-						if (game.hasNature(card)) {
+						if (hasNatureLike(card)) {
 							return [0, get.recoverEffect(target, player, target)];
 						}
 					},
