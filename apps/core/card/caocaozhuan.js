@@ -178,10 +178,9 @@ export default {
 			type: "equip",
 			subtype: "equip1",
 			distance: { attackFrom: -3 },
-			// 【equipValue 4.5】效果是「每回合一次，你造成的火属性伤害 +1」。
-			// 上有方天画戟/金火罐炮/养由基之弓的 5，下有七星剑和两把弓的 4；
-			// 本体最高就是贯石斧 4.5，刚好落在这一档。
-			ai: { basic: { equipValue: 4.5 } },
+			// 【equipValue 维持 4】先前改过 4.5，那是按“无限次 + 覆盖面宽”定的；
+			// 现在技能已削成每回合一次，前提没了，回到 4 —— 和七星剑、两把弓同档。
+			ai: { basic: { equipValue: 4 } },
 			skills: ["ccz_wuhuoshenyanshan_skill"],
 		},
 
