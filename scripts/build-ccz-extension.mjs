@@ -40,32 +40,22 @@ const IMG_DIR = "apps/core/image/card";
 const raw = await fs.readFile(SRC, "utf8");
 const src = raw.split("\r\n").join("\n");
 
-// ── ① 抽出所有模块作用域的辅助函数（技能都依赖它们，包装后要放进闭包）──
-// 【为什么不写死函数名】上一版只抽 armorValid，后来卡牌包里又加了
-// hasNatureLike，打出来的扩展就是 ReferenceError——而这个错只在玩家装了扩展、
-// 且真的碰到黄金铠/太平要术时才炸，构建和语法检查都查不出来。
-// 改成扫描 export default 之前的全部顶层 function 声明，以后加函数不用再改这里。
-const defAtForFns = src.indexOf("export default");
-const helperSrcs = [];
-for (const m of src.slice(0, defAtForFns).matchAll(/^function\s+(\w+)\s*\(/gm)) {
-	const start = m.index;
-	let depth = 0,
-		end = -1;
-	for (let i = src.indexOf("{", start); i < src.length; i++) {
-		if (src[i] === "{") depth++;
-		else if (src[i] === "}") {
-			depth--;
-			if (!depth) {
-				end = i + 1;
-				break;
-			}
-		}
+// 【为什么不再抽取顶层函数】卡牌包已改成**零顶层函数**（与本体风格一致：
+// card/*.js 与 character/*/skill.js 的顶层 function 数全是 0，每个技能自成一体）。
+// 原先这里要把 armorValid / hasNatureLike 之类抽出来注入 game.import 闭包 ——
+// 那一步炸过一次（新加的 hasNatureLike 没抽到，而那个错只在玩家装了扩展、
+// 且真碰到黄金铠时才 ReferenceError，构建和 node --check 都查不出来）。
+// 摆开之后这个环节直接删掉，少一份只在运行期才炸的风险。
+// 留一道断言防回退：真要再加顶层函数，就得同时把注入逻辑加回来。
+{
+	const strayFns = [...src.slice(0, src.indexOf("export default")).matchAll(/^function\s+(\w+)/gm)].map(m => m[1]);
+	if (strayFns.length) {
+		throw new Error(
+			`卡牌包里出现了顶层函数 ${strayFns.join(", ")} —— 本包约定零顶层函数（与本体一致）。` +
+				"要么把它摆回各个技能里，要么在本脚本里重新加回抽取逻辑并注入闭包。"
+		);
 	}
-	if (end < 0) throw new Error(`函数 ${m[1]} 的括号没配平`);
-	helperSrcs.push(src.slice(start, end));
 }
-if (!helperSrcs.length) throw new Error("一个顶层辅助函数都没找到，卡牌包结构可能变了");
-const armorValidSrc = helperSrcs.join("\n\n");
 let depth = 0;
 // ── ② 抽出 export default 的对象字面量 ──
 const defAt = src.indexOf("export default {");
@@ -115,8 +105,6 @@ const extensionJs = `/**
  * typeof game.readFile === "function"，网页/PWA 版没有文件系统权限，装不了。
  */
 game.import("extension", function (lib, game, ui, get, ai, _status) {
-	${armorValidSrc.split("\n").join("\n\t")}
-
 	/** 卡牌包内容（结构同本体 card/*.js） */
 	var PACK = ${withImages.split("\n").join("\n\t")};
 
