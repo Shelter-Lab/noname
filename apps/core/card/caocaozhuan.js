@@ -1264,7 +1264,9 @@ export default {
 			equipSkill: true,
 			trigger: { player: ["shaMiss", "eventNeutralized"] },
 			filter(event, player) {
-				if (!event.card || event.card.name !== "sha" || !event.target?.isIn()) {
+				// event.type === "card" 照贯石斧补的：非牌途径产生的【杀】事件没有完整的
+				// _result 结构，上面那两行赋值会抛。
+				if (event.type !== "card" || !event.card || event.card.name !== "sha" || !event.target?.isIn()) {
 					return false;
 				}
 				return player.countCards("h") > 0;
@@ -1283,7 +1285,24 @@ export default {
 					.forResult();
 			},
 			async content(event, trigger, player) {
-				await trigger.target.damage(player, get.nature(trigger.card));
+				// 【不能自己 damage()，要**取消那次闪避**】本体贯石斧（standard.js:3811，
+				// 机制完全一样：弃牌令杀仍造成伤害）的写法就是把「闪成功」改成「没闪掉」，
+				// 让那张【杀】自己的 damageTarget() 跑完。
+				// 原来写 trigger.target.damage(player, get.nature(trigger.card))，那是**另一次伤害**，
+				// 不是"这张杀的伤害"，于是四处全错：
+				//   · 酒的 +1 不生效 —— damage() 读的是 _status.event.baseDamage，而技能事件没这个字段，永远算 1 点
+				//   · 玉玺的 +1 不生效 —— 它的 filter 要 event.card.name 是 sha，而这里 event.card 是 undefined
+				//   · 连环铠/镜铠挡不住 —— 它们同样判 event.card.name === "sha"
+				//   · 白银铠会误挡 —— 它防的是 !event.card（无来源牌的伤害），恰好把这一下当技能伤害挡下了
+				// 描述写的是「仍受到此【杀】的伤害」，这个写法才名副其实。
+				if (event.triggername === "shaMiss") {
+					trigger.untrigger();
+					trigger.trigger("shaHit");
+					trigger._result.bool = false;
+					trigger._result.result = null;
+				} else {
+					trigger.unneutralize();
+				}
 			},
 		},
 
