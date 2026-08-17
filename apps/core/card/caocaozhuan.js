@@ -1096,14 +1096,22 @@ export default {
 					if (target.hasSkillTag("unequip2") || arg.player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) || arg.player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })) {
 						return false;
 					}
-					return Boolean(!card);
+					// 同上：看伪牌名，不看"有没有牌"。
+					// 那 10 个不传 arg.card 的调用点会拿到 null → 不在名单里 → false（不减伤），
+					// 正是上面注释里说的保守方向；写 !card 反而会对**任何**伤害声称减伤。
+					return ["damage", "firedamage", "thunderdamage", "icedamage"].includes(card ? get.name(card) || card.name : null);
 				},
 				effect: {
 					target(card, player, target, current) {
 						if (target.hasSkillTag("unequip2") || player.hasSkillTag("unequip", false, { name: card ? card.name : null, target: target, card: card }) || player.hasSkillTag("unequip_ai", false, { name: card ? card.name : null, target: target, card: card })) {
 							return;
 						}
-						if (!!card) {
+						// 【AI 侧的"技能伤害"不是"没有牌"，而是**伪牌名**】get.effect 永远带着一张
+						// 牌调用；技能伤害走 get.damageEffect，它造的是 {name:"damage"} /
+						// {name:"firedamage"} 这种**对象**，是 truthy。所以规则侧的 !event.card
+						// 搬到这里会恒假 —— 一度写成 if (!!card) return，整个提示变成死代码。
+						// 本卡是六件里唯一"规则侧条件在 AI 侧没有直接对应"的，必须单独写。
+						if (!["damage", "firedamage", "thunderdamage", "icedamage"].includes(card ? get.name(card) || card.name : null)) {
 							return;
 						}
 						return "zeroplayertarget";
