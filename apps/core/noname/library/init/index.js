@@ -150,6 +150,11 @@ export class LibInit {
 			// 失败(至今未修)。两万条里出几条几乎是必然,而丢掉的素材表现为「玩到那里才发现是剪影」,
 			// 极难事后定位 —— 所以攒起来在末尾统一重试一轮,仍失败的如实报数并写进库内日志。
 			const writeFailed = [];
+			// 取不下来（非 200 / 网络失败）的 URL。与 writeFailed（取到了但写不进库）分开记：
+			// 两者成因和补救完全不同——前者要重新联网，后者是本地存储抖动。
+			const fetchFailed = [];
+			// 上一批结束时 writeFailed 的长度，用来算“这一批新增了几个写失败”，从 done 里扣。
+			let writeFailedBefore = 0;
 			// 【不需要在这里记版本号】db.putAssets 内部会算好 SHA-256 写进版本表，
 			// 和字节同一个事务 —— 结构上不存在"写了字节忘了记账"这个可能。
 			// （之前靠调用方自觉补基线，而三个写入口里两个在 SW 里、一直没记。）
@@ -160,7 +165,14 @@ export class LibInit {
 				const results = await Promise.allSettled(
 					batch.map(async url => {
 						const r = await fetch(url, { cache: "no-cache" });
-						if (!r || r.status !== 200) return;
+						if (!r || r.status !== 200) {
+							// 【非 200 必须算失败，不能静默 return】原来这里直接 return，而
+							// Promise.allSettled 会把它记成 fulfilled → 外层 done++ →
+							// **404 也被算成“已完成”**，进度条走到 N/N 并提示“断网也能玩”，
+							// 而那个文件其实没下来。用假成功掩盖真失败，正是本仓库反复踩的坑
+							// （素材库读不到伪装成 0、清单假 200 …）。抛出去让 allSettled 记 rejected。
+							throw new Error(`HTTP ${r ? r.status : "无响应"}`);
+						}
 						if (db && !isCodeAsset(pathOf(url))) {
 							// 素材 → IndexedDB。【只存 ArrayBuffer,绝不存 Blob】WebKit 下 IDB 里的 Blob 会
 							// 每个落成一个独立 .blob 文件,等于把「万文件」问题原样搬过去(还有 235687 等
@@ -189,15 +201,27 @@ export class LibInit {
 				// 量级上会慢一个数量级。
 				if (fetched.length) {
 					const { failed } = await db.putAssets(fetched);
-					if (failed.length) writeFailed.push(...fetched.filter(f => failed.includes(f.path)).map(f => f.path));
+					if (failed.length) {
+						writeFailed.push(...fetched.filter(f => failed.includes(f.path)).map(f => f.path));
+					}
 				}
-				for (const res of results) {
+				for (let i = 0; i < results.length; i++) {
+					const res = results[i];
 					if (res.status === "fulfilled") {
 						done++;
-					} else if (res.reason && (res.reason.name === "QuotaExceededError" || String(res.reason).includes("quota"))) {
+						continue;
+					}
+					// 取不下来的也要留名单：否则“完成 N/total”里那段差额无从解释；
+					// 而它们不在已有 key 里，下次点击会自动续传重试。
+					fetchFailed.push(batch[i]);
+					if (res.reason && (res.reason.name === "QuotaExceededError" || String(res.reason).includes("quota"))) {
 						quotaExceeded = true;
 					}
 				}
+				// 【写库失败的不算完成】fetch 成功但 putAssets 没写进去，文件并不在本地。
+				// 它们已进 writeFailed，末尾重试一轮，成功的再加回来。
+				done -= writeFailed.length - writeFailedBefore;
+				writeFailedBefore = writeFailed.length;
 				setText(`下载中 ${done}/${total}`);
 				if (quotaExceeded) break;
 			}
@@ -215,6 +239,8 @@ export class LibInit {
 					} catch {}
 				}
 				const { failed } = await db.putAssets(retry);
+				// 重试补回来的加回 done（上面每批已按新增写失败数扣过）
+				done += writeFailed.length - failed.length;
 				writeFailed.length = 0;
 				writeFailed.push(...failed);
 				if (failed.length) {
@@ -222,7 +248,15 @@ export class LibInit {
 				}
 			}
 
-			const outcome = { done, total, failed: writeFailed.slice(), aborted: Boolean(lib.init._offlineDownloadAbort), quota: quotaExceeded };
+			// failed 合并两类：取不下来的 + 取到了写不进库的。调用方（检查更新的精确补差）
+			// 只关心“还差哪些”，不必区分成因；成因在下面的提示文案里分开说。
+			const outcome = {
+				done,
+				total,
+				failed: fetchFailed.concat(writeFailed),
+				aborted: Boolean(lib.init._offlineDownloadAbort),
+				quota: quotaExceeded,
+			};
 			if (silent) {
 				setText(forced ? "下载离线资源" : done >= total ? "已下载离线资源" : "下载离线资源");
 				return outcome;
@@ -232,6 +266,10 @@ export class LibInit {
 				setText("下载离线资源");
 			} else if (lib.init._offlineDownloadAbort) {
 				alert(`已暂停。当前已缓存 ${done}/${total},再次点击可继续。`);
+				setText("下载离线资源");
+			} else if (fetchFailed.length) {
+				// 【取不下来要单独报】原来非 200 被当成完成，于是缺文件也提示“断网也能玩”。
+				alert(`离线资源下载完成(${done}/${total})，但有 ${fetchFailed.length} 个没能取下来（404 或网络失败）。\n再次点击「下载离线资源」可重试。`);
 				setText("下载离线资源");
 			} else if (writeFailed.length) {
 				// 【写失败要如实告知】默默说「完成」而实际少了几十个素材,表现成"玩到那里才发现是剪影",

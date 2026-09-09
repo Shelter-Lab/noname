@@ -463,8 +463,17 @@ self.addEventListener("activate", event => {
 			// 删素材桶动不到它们;③ 其余立绘/语音本来就要重新下载一次(素材换了存储),
 			// 删与不删都得重下,那就不必留着白付那 15.8 秒。
 			// 代价:删掉到重新下载之间,未下载的立绘/语音显示为剪影(在线时照常联网取)。
+			// 【只删本应用前缀的桶，不能删“所有不是我的桶”】Cache Storage 是 **origin 级**的：
+			// 同一个域名下所有应用共用一个池子，桶名就是 key。原来写的是
+			//     keys.filter(k => k !== CODE_CACHE)
+			// 意思是「把这个域名下除我以外的桶全删掉」——我们独占 CF 域名时无害，但部署到
+			// GitHub Pages 这类 user.github.io/<app>/ 的同源多应用环境，会把**别人 PWA 的
+			// 离线缓存一起清掉**。上游 review 指出的就是这一条。
+			// 本仓库只建两个桶，都是 noname- 前缀（noname-code-v1 / 已退役的 noname-pwa-v2）；
+			// JIT 那个第二个 SW（dist/service-worker.js）一个 caches 都不用，所以按前缀过滤
+			// 既不会漏删旧素材桶、也不会误伤别人。
 			const keys = await caches.keys();
-			await Promise.all(keys.filter(k => k !== CODE_CACHE).map(k => caches.delete(k)));
+			await Promise.all(keys.filter(k => k.startsWith("noname-") && k !== CODE_CACHE).map(k => caches.delete(k)));
 			await self.clients.claim();
 		})()
 	);
