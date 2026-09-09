@@ -52,7 +52,10 @@ export default {
 			// 【距离 -3 = 攻击范围 4，与本体方天画戟一致】standard.js 的 fangtian 就是
 			// attackFrom: -3。同名同形制的牌范围不一样会让人误判，对齐它。
 			distance: { attackFrom: -3 },
-			ai: { basic: { equipValue: 5 } },
+			// 【equipValue 4】效果已对齐本体「无双方天戟」（摸一张 / 弃对方一张），
+			// 比原来那套连击弱得多，故从 5 降下来。本体给同效果的那张定 3，
+			// 我们取 4 是为了和本包内的七星剑、两把弓（都是 4）同档——包内可比性优先。
+			ai: { basic: { equipValue: 4 } },
 			skills: ["ccz_fangtianhuaji_skill"],
 		},
 
@@ -549,104 +552,54 @@ export default {
 		ccz_fangtianhuaji_skill: {
 			equipSkill: true,
 			trigger: { source: "damageSource" },
-			// 【usable: 2 —— 算上你自己那张【杀】正好三个人，即"三英战吕布"】
-			// 别把 usable 当"总共打几个人"读:它只数**技能发动了几次**。
-			// 你主动出的那张【杀】打 A 是第一个人，技能再发动 2 次牵连 B、C —— 合计三人。
-			// (曾经写 3，那是四个人，比典故多一个,而且 4 张卡换 4 次攻击在装备里偏猛。)
-			// 连锁本身不用写：这里用 useCard 打出的【杀】若造成伤害，会再次触发同一个 trigger，
-			// 于是自然形成"命中→再选一人→再命中→再选"的链。所以真正要做的只是**封顶** ——
-			// 不封顶的话手牌够就能连穿全场，那不是强，是失控。
-			// 【为什么用内建 usable 而不自己记账】原先是 markAuto 把"本回合打过谁"记进 storage +
-			// clearTime，两处都错：没有定义 ccz_fangtianhuaji_used 那个标记技能，没人清它，
-			// 实际退化成"每局限一次"；而 clearTime 在本体库里只有两处 UI 判断，压根不清存储。
-			usable: 2,
+			// 【效果改成与本体「无双方天戟」一致】原先是自创的连击（命中后弃牌再对另一人出
+			// 杀/决斗，每回合两次），实测太强：四张卡换四次攻击，还能和玉玺等叠。
+			// 本体 sp 包里已有同名同形制的武器 wushuangfangtianji（character/sp/card.js:171，
+			// 同样 attackFrom: -3 即范围 4），效果是「当你因执行【杀】的效果而造成伤害后，
+			// 你可选择一项：摸一张牌 / 弃置目标角色的一张牌」。直接对齐它，不再自创。
+			// 实现照 character/sp/skill.js:26229 的 wushuangfangtianji_skill，只把旧式
+			// "step 0/1" 写法换成本包统一的 async cost/content。
 			filter(event, player) {
-				// 【排除自伤】若【杀】打到自己，event.player 就是自己 —— 那"选其他人"会把
-				// 自己当成起点，等于自伤一下就白得一刀。
-				// 【决斗也算】只吃【杀】的话触发面太窄。决斗赢了同样是你把人打疼了，
-				// 接着挥戟顺理成章;本包玉玺也是 ["sha","juedou"] 这一对，口径一致。
-				// 注:决斗输了的那次伤害来源是对方，source:"damageSource" 不会在你身上触发，不必额外排除。
-				if (!event.card || !["sha", "juedou"].includes(event.card.name) || !event.player?.isIn() || event.player === player) {
-					return false;
-				}
-				// 【每名角色每回合限一次】只排除"刚被打的那个"是不够的:那样 A→B→A 仍成立
-				// （轮到选第三个时被排除的是 B），三刀就能集火两点砸在一人头上 ——
-				// 那是集火处刑，不是"战三英"。故用标记记下本回合已被此法牵连过的人。
-				// 【canUse 第三参 false = 无距离限制】连击那一下**不受攻击范围约束**，
-				// 能打全场任何人 —— 范围 4 只管你自己主动出的那张【杀】。
-				// 有意如此:吕布在阵中转身就砍，不该被"隔了两个人"挡住。
-				const done = player.getStorage("ccz_fangtianhuaji_used");
-				return player.countCards("h") > 0 && game.hasPlayer(t => t !== player && t !== event.player && !done.includes(t) && (player.canUse("sha", t, false) || player.canUse("juedou", t, false)));
+				// 【event.getParent().type == "card" 不能省】它保证这次伤害来自「执行一张牌的效果」，
+				// 而不是某个技能内部借【杀】的名义造伤害。本体原实现就带这一条。
+				return event.card && event.card.name === "sha" && event.getParent().type === "card" && event.player?.isIn();
 			},
 			async cost(event, trigger, player) {
-				event.result = await player
-					.chooseTarget(get.prompt2("ccz_fangtianhuaji"), (card, player, target) => {
-						if (target === player || target === _status.event.hurt || _status.event.done.includes(target)) {
-							return false;
+				const target = trigger.player;
+				const canDiscard = target.hasCard(card => lib.filter.canBeDiscarded(card, player, target), "he");
+				const choices = ["摸一张牌"];
+				if (canDiscard) {
+					choices.push("弃置" + get.translation(target) + "的一张牌");
+				}
+				const { result } = await player
+					.chooseControl("cancel2")
+					.set("choiceList", choices)
+					.set("prompt", get.prompt2("ccz_fangtianhuaji"))
+					.set("targetx", target)
+					// 【目标显式传进来，别靠 getParent() 猜事件链】猜错就是 undefined，
+					// get.effect 拿到 undefined 恒返回 0 → AI 永远选第 0 项，而且一声不响。
+					.set("ai", () => {
+						const me = get.event().player;
+						const t = get.event().targetx;
+						const canDiscardNow = t.hasCard(card => lib.filter.canBeDiscarded(card, me, t), "he");
+						// guohe_copy2 是本体估「弃对方一张牌」的标准伪牌名（原实现同此）
+						if (canDiscardNow && get.effect(t, { name: "guohe_copy2" }, me, me) > get.effect(me, { name: "draw" }, me, me)) {
+							return 1;
 						}
-						return player.canUse("sha", target, false) || player.canUse("juedou", target, false);
-					})
-					.set("hurt", trigger.player)
-					.set("done", player.getStorage("ccz_fangtianhuaji_used"))
-					// 两者取更优的那个来估值 —— 否则对"只能决斗打得动"的目标会算出 0 而不选
-					.set("ai", target => {
-						const me = get.player();
-						return Math.max(me.canUse("sha", target, false) ? get.effect(target, { name: "sha" }, me, me) : 0, me.canUse("juedou", target, false) ? get.effect(target, { name: "juedou" }, me, me) : 0);
+						return 0;
 					})
 					.forResult();
+				// cancel2 = 放弃发动；bool false 让本体不记发动、不播技能特效
+				event.result = { bool: result.control !== "cancel2", index: result.index };
 			},
 			async content(event, trigger, player) {
-				const target = event.targets[0];
-				const { result } = await player.chooseToDiscard("h", true, `弃置一张手牌，视为对${get.translation(target)}使用【杀】或【决斗】`);
-				if (!result?.bool) {
+				if (event.index === 0) {
+					await player.draw();
 					return;
 				}
-				// 【杀 / 决斗二选一】决斗不能被【闪】挡，但拼杀输了伤的是自己 —— 是个真选择。
-				// 只把当下合法的那些列出来:若只有一个能用，直接用它，不拿单选项去烦人。
-				const usable = ["sha", "juedou"].filter(name => player.canUse(name, target, false));
-				if (!usable.length) {
-					return;
-				}
-				let name = usable[0];
-				if (usable.length > 1) {
-					const { result: pick } = await player
-						.chooseControl()
-						.set("prompt", `方天画戟：视为对${get.translation(target)}使用哪一张？`)
-						.set("choiceList", ["【杀】（可被【闪】抵消）", "【决斗】（拼杀，输了你受伤）"])
-						// 【目标要显式传进来，别靠 getParent() 猜事件链】猜错就是 undefined，
-						// get.effect 拿到 undefined 恒返回 0 → AI 永远选第 0 项(杀)，而且一声不响。
-						.set("targetx", target)
-						.set("ai", () => {
-							const me = get.event().player;
-							const t = get.event().targetx;
-							return get.effect(t, { name: "juedou" }, me, me) > get.effect(t, { name: "sha" }, me, me) ? 1 : 0;
-						})
-						.forResult();
-					name = pick.index === 1 ? "juedou" : "sha";
-				}
-				// 【标记要连"这一环的受害者"一起记】否则链头那个人没进名单，
-				// 绕一圈还能回头再打他 —— A→B→A 就是这么漏出来的。
-				player.addTempSkill("ccz_fangtianhuaji_used");
-				player.markAuto("ccz_fangtianhuaji_used", [trigger.player, target]);
-				// 【isCard 必须为 true】本体所有「视为使用杀/决斗」都是 isCard: true
-				// (huicui:2596/18980、refresh:3106、tw:16714、collab:8794 … 六处无例外)。
-				// 写 false 时【杀】能用、【决斗】走不起来 —— 决斗的 content 要抽牌拼杀、
-				// 走完整的"真牌"使用流程，而 isCard: false 把它当成非牌处理了。
-				// 【第三个参数 false】useCard 里布尔值落到 addCount —— 不计入出牌次数，正是我们要的。
-				await player.useCard({ name, isCard: true }, target, false);
+				await player.discardPlayerCard(trigger.player, "he", true);
 			},
 		},
-		/**
-		 * 记账用：本回合已被方天画戟牵连过的人。
-		 * 【三件事必须都对，否则限次静默失效】
-		 *  1. 必须**定义**这个技能 —— 只 markAuto 不定义，storage 里的数据没人管；
-		 *  2. 用 addTempSkill 挂上去，靠它的默认到期
-		 *     （{ global: ["phaseAfter","phaseBeforeStart"] }，任意回合结束即清）；
-		 *  3. onremove 必须写字符串 "storage" —— removeSkill 里只认 function 和 string 两种，
-		 *     写 onremove: true 落不到任何分支，storage 不会被清。
-		 * 本包曾因为漏了第 1 条，让"每回合限一次"实际变成"每局限一次"。
-		 */
-		ccz_fangtianhuaji_used: { charlotte: true, nopop: true, onremove: "storage" },
 
 		// —— 吕布之弓：下回合不能使用【杀】——
 		ccz_lvbuzhigong_skill: {
@@ -1445,9 +1398,8 @@ export default {
 			},
 			async content(event, trigger, player) {
 				const target = event.target;
-				// 【四次而不是三次】实测三次太弱：期望 1.5 点伤，而成本是一张梅花手牌 +
-				// 出牌阶段限一次，不如直接出一张【杀】。四次 = 期望 2 点雷伤。
-				for (let i = 0; i < 4; i++) {
+				// 【三次判定】曾改成四次（期望 2 点），实测太强，改回三次：期望 1.5 点雷伤。
+				for (let i = 0; i < 3; i++) {
 					// 目标死了/自己死了就停,别对着空位继续判
 					if (!target.isIn() || !player.isIn()) {
 						break;
@@ -1464,10 +1416,10 @@ export default {
 			ai: {
 				order: 8,
 				result: {
-					// 期望 2 点雷电伤害(4 次判定 × 黑色 50%)。damageEffect 会自动算目标血量/属性/防具/会不会被杀死,
-					// 乘以 2 就是期望收益 —— 不用自己算"值不值得"。
+					// 期望 1.5 点雷电伤害(3 次判定 × 黑色 50%)。damageEffect 会自动算目标血量/属性/防具/会不会被杀死,
+					// 乘以 1.5 就是期望收益 —— 不用自己算"值不值得"。
 					target(player, target) {
-						return 2 * get.damageEffect(target, player, target, "thunder");
+						return 1.5 * get.damageEffect(target, player, target, "thunder");
 					},
 				},
 			},
@@ -1633,9 +1585,9 @@ export default {
 		// 武器
 		ccz_fangtianhuaji: "方天画戟",
 		ccz_fangtianhuaji_bg: "戟",
-		ccz_fangtianhuaji_info: "每回合限两次且每名角色限一次，当你使用【杀】或【决斗】对其他角色造成伤害后，你可以弃置一张手牌，视为对另一名角色使用一张【杀】或【决斗】（无距离限制）。",
+		ccz_fangtianhuaji_info: "当你因执行【杀】的效果而造成伤害后，你可选择一项：⒈摸一张牌；⒉弃置目标角色的一张牌。",
 		ccz_fangtianhuaji_skill: "方天画戟",
-		ccz_fangtianhuaji_skill_info: "当你使用【杀】对目标角色造成伤害后，你可以弃置一张牌，视为对该角色的上家或下家使用一张【杀】。每名角色每回合限一次。",
+		ccz_fangtianhuaji_skill_info: "当你因执行【杀】的效果而造成伤害后，你可选择一项：⒈摸一张牌；⒉弃置目标角色的一张牌。",
 
 		ccz_lvbuzhigong: "吕布之弓",
 		ccz_lvbuzhigong_bg: "弓",
@@ -1768,9 +1720,9 @@ export default {
 		// 四象宝玉
 		ccz_qinglongbaoyu: "青龙宝玉",
 		ccz_qinglongbaoyu_bg: "龙",
-		ccz_qinglongbaoyu_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行四次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
+		ccz_qinglongbaoyu_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
 		ccz_qinglongbaoyu_skill: "青龙宝玉",
-		ccz_qinglongbaoyu_skill_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行四次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
+		ccz_qinglongbaoyu_skill_info: "出牌阶段限一次，你可以弃置一张梅花手牌并选择一名其他角色，然后进行三次判定：每次判定结果为黑色，你对其造成1点雷电伤害。",
 
 		ccz_zhuquebaoyu: "朱雀宝玉",
 		ccz_zhuquebaoyu_bg: "雀",
